@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: fhir-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: fhiruser
+      MONGO_INITDB_ROOT_PASSWORD: fhirpass
+      MONGO_INITDB_DATABASE: fhirdb
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - fhir-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # FHIR Spring Boot Application
+  fhir-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fhir-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATA_MONGODB_URI: mongodb://fhiruser:fhirpass@mongodb:27017/fhirdb?authSource=admin
+      MONGODB_DATABASE: fhirdb
+      FHIR_BASE_URL: http://localhost:8080/fhir
+      JAVA_OPTS: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - fhir-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # MongoDB Express - Web-based MongoDB Admin (optional)
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: fhir-mongo-express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: fhiruser
+      ME_CONFIG_MONGODB_ADMINPASSWORD: fhirpass
+      ME_CONFIG_MONGODB_URL: mongodb://fhiruser:fhirpass@mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin123
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - fhir-network
+    profiles:
+      - admin
+
+networks:
+  fhir-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
