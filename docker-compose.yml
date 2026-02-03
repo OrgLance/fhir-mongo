@@ -31,7 +31,7 @@ services:
         reservations:
           memory: 512M
 
-  # Redis Cache (secured with password)
+  # Redis Cache (secured with password) - Optional
   redis:
     image: redis:7.2-alpine
     container_name: fhir-redis
@@ -62,6 +62,8 @@ services:
           memory: 512M
         reservations:
           memory: 128M
+    profiles:
+      - redis
 
   # FHIR Spring Boot Application
   fhir-server:
@@ -80,7 +82,8 @@ services:
       MONGO_POOL_MAX_SIZE: 200
       MONGO_POOL_MIN_SIZE: 20
       # Redis Configuration (secured with password)
-      SPRING_CACHE_TYPE: redis
+      # Set SPRING_CACHE_TYPE=redis to enable Redis caching
+      SPRING_CACHE_TYPE: ${CACHE_TYPE:-simple}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: fhirRedis@2024
@@ -101,8 +104,9 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+      # Redis is optional - uncomment to require it
+      # redis:
+      #   condition: service_healthy
     networks:
       - fhir-network
     healthcheck:
@@ -139,7 +143,7 @@ services:
     profiles:
       - admin
 
-  # Redis Commander - Web-based Redis Admin (optional)
+  # Redis Commander - Web-based Redis Admin (requires redis profile)
   redis-commander:
     image: rediscommander/redis-commander:latest
     container_name: fhir-redis-commander
@@ -156,7 +160,7 @@ services:
     networks:
       - fhir-network
     profiles:
-      - admin
+      - redis
 
   # Prometheus - Metrics Collection (optional)
   prometheus:
