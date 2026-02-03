@@ -132,7 +132,7 @@ cd "$PROJECT_DIR"
 COMPOSE_CMD=$(get_compose_cmd)
 
 # Build command
-CMD="$COMPOSE_CMD --profile admin --profile monitoring --profile redis logs"
+CMD="$COMPOSE_CMD --profile admin --profile monitoring logs"
 
 if [ "$FOLLOW" = true ]; then
     CMD="$CMD -f"

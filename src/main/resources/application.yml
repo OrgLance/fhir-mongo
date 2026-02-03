@@ -16,21 +16,21 @@ spring:
     mongodb:
       uri: ${MONGODB_URI:mongodb://fhiruser:fhirpass@localhost:27017/fhirdb?authSource=admin}
       database: ${MONGODB_DATABASE:fhirdb}
-  # Cache Configuration (using simple in-memory cache, Redis disabled)
+  # Cache Configuration (Redis with password authentication)
   cache:
-    type: simple
-  # Redis disabled - uncomment to enable
-  # redis:
-  #   host: ${REDIS_HOST:localhost}
-  #   port: ${REDIS_PORT:6379}
-  #   password: ${REDIS_PASSWORD:}
-  #   timeout: 2000ms
-  #   lettuce:
-  #     pool:
-  #       max-active: 100
-  #       max-idle: 50
-  #       min-idle: 10
-  #       max-wait: 2000ms
+    type: ${SPRING_CACHE_TYPE:simple}
+  # Redis Configuration (secured with password)
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:fhirRedis@2024}
+    timeout: 2000ms
+    lettuce:
+      pool:
+        max-active: 100
+        max-idle: 50
+        min-idle: 10
+        max-wait: 2000ms
 
 fhir:
   server:
@@ -107,3 +107,4 @@ logging:
     ca.uhn.fhir: INFO
     org.springframework.cache: DEBUG
     org.springframework.data.mongodb: INFO
+    io.lettuce.core: INFO

@@ -182,13 +182,14 @@ All scripts are located in the `scripts/` directory:
 | Password | `fhirpass` |
 | Connection String | `mongodb://fhiruser:fhirpass@localhost:27017/fhirdb?authSource=admin` |
 
-### Redis
+### Redis (Secured)
 
 | Property | Value |
 |----------|-------|
 | Host | `localhost` (local) / `redis` (docker) |
 | Port | `6379` |
-| Password | *(none)* |
+| Password | `fhirRedis@2024` |
+| Connection | `redis://:fhirRedis@2024@localhost:6379` |
 
 ### MongoDB Express (Admin UI)
 

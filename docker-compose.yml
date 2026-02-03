@@ -31,20 +31,27 @@ services:
         reservations:
           memory: 512M
 
-  # Redis Cache (optional - disabled by default)
+  # Redis Cache (secured with password)
   redis:
     image: redis:7.2-alpine
     container_name: fhir-redis
     restart: unless-stopped
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: >
+      redis-server
+      --requirepass fhirRedis@2024
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --protected-mode yes
+      --bind 0.0.0.0
     volumes:
       - redis_data:/data
     networks:
       - fhir-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "fhirRedis@2024", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -55,8 +62,6 @@ services:
           memory: 512M
         reservations:
           memory: 128M
-    profiles:
-      - redis
 
   # FHIR Spring Boot Application
   fhir-server:
@@ -74,11 +79,11 @@ services:
       # MongoDB Pool Settings
       MONGO_POOL_MAX_SIZE: 200
       MONGO_POOL_MIN_SIZE: 20
-      # Redis disabled - using in-memory cache
-      # To enable Redis, start with: docker-compose --profile redis up
-      # REDIS_HOST: redis
-      # REDIS_PORT: 6379
-      # REDIS_PASSWORD: ""
+      # Redis Configuration (secured with password)
+      SPRING_CACHE_TYPE: redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: fhirRedis@2024
       # FHIR Settings
       FHIR_BASE_URL: http://localhost:8080/fhir
       # Async Pool Settings
@@ -96,9 +101,8 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      # Redis disabled - uncomment to enable
-      # redis:
-      #   condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - fhir-network
     healthcheck:
@@ -135,7 +139,7 @@ services:
     profiles:
       - admin
 
-  # Redis Commander - Web-based Redis Admin (optional, requires redis profile)
+  # Redis Commander - Web-based Redis Admin (optional)
   redis-commander:
     image: rediscommander/redis-commander:latest
     container_name: fhir-redis-commander
@@ -143,7 +147,7 @@ services:
     ports:
       - "8082:8081"
     environment:
-      REDIS_HOSTS: local:redis:6379
+      REDIS_HOSTS: local:redis:6379:0:fhirRedis@2024
       HTTP_USER: admin
       HTTP_PASSWORD: admin123
     depends_on:
@@ -152,7 +156,7 @@ services:
     networks:
       - fhir-network
     profiles:
-      - redis
+      - admin
 
   # Prometheus - Metrics Collection (optional)
   prometheus:

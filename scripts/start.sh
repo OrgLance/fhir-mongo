@@ -41,20 +41,18 @@ print_usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  -a, --all         Start all services (admin + monitoring + redis)"
-    echo "  -m, --admin       Start with admin UI (MongoDB Express)"
+    echo "  -a, --all         Start all services (admin + monitoring)"
+    echo "  -m, --admin       Start with admin UIs (MongoDB Express, Redis Commander)"
     echo "  -o, --monitoring  Start with monitoring (Prometheus, Grafana)"
-    echo "  -r, --redis       Enable Redis caching (disabled by default)"
     echo "  -b, --build       Build images before starting"
     echo "  -f, --foreground  Run in foreground (show logs)"
     echo "  -n, --no-wait     Don't wait for services to be healthy"
     echo "  -h, --help        Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0                # Start basic services (MongoDB, FHIR Server)"
-    echo "  $0 --admin        # Start with MongoDB Express"
+    echo "  $0                # Start basic services (MongoDB, Redis, FHIR Server)"
+    echo "  $0 --admin        # Start with admin UIs"
     echo "  $0 --monitoring   # Start with Prometheus & Grafana"
-    echo "  $0 --redis        # Start with Redis caching"
     echo "  $0 --all          # Start all services"
     echo "  $0 --all --build  # Rebuild and start all services"
 }
@@ -130,18 +128,13 @@ print_services() {
     echo ""
     echo -e "  ${BLUE}Databases${NC}"
     echo "    • MongoDB:      localhost:27017  (fhiruser/fhirpass)"
-
-    if [[ "$PROFILE" == *"redis"* ]] || [[ "$PROFILE" == *"all"* ]]; then
-        echo "    • Redis:        localhost:6379"
-    fi
+    echo "    • Redis:        localhost:6379   (password: fhirRedis@2024)"
 
     if [[ "$PROFILE" == *"admin"* ]] || [[ "$PROFILE" == *"all"* ]]; then
         echo ""
         echo -e "  ${BLUE}Admin UIs${NC}"
         echo "    • MongoDB Express:   http://localhost:8081  (admin/admin123)"
-        if [[ "$PROFILE" == *"redis"* ]] || [[ "$PROFILE" == *"all"* ]]; then
-            echo "    • Redis Commander:   http://localhost:8082  (admin/admin123)"
-        fi
+        echo "    • Redis Commander:   http://localhost:8082  (admin/admin123)"
     fi
 
     if [[ "$PROFILE" == *"monitoring"* ]] || [[ "$PROFILE" == *"all"* ]]; then
@@ -163,7 +156,7 @@ print_services() {
 while [[ $# -gt 0 ]]; do
     case $1 in
         -a|--all)
-            PROFILE="admin,monitoring,redis"
+            PROFILE="admin,monitoring"
             shift
             ;;
         -m|--admin)
@@ -179,14 +172,6 @@ while [[ $# -gt 0 ]]; do
                 PROFILE="monitoring"
             else
                 PROFILE="$PROFILE,monitoring"
-            fi
-            shift
-            ;;
-        -r|--redis)
-            if [ -z "$PROFILE" ]; then
-                PROFILE="redis"
-            else
-                PROFILE="$PROFILE,redis"
             fi
             shift
             ;;
@@ -261,10 +246,7 @@ if [ "$DETACHED" = true ] && [ "$WAIT" = true ]; then
     echo ""
 
     wait_for_service "MongoDB" "http://localhost:27017" || true
-
-    if [[ "$PROFILE" == *"redis"* ]] || [[ "$PROFILE" == *"all"* ]]; then
-        wait_for_service "Redis" "http://localhost:6379" || true
-    fi
+    wait_for_service "Redis" "http://localhost:6379" || true
 
     # Wait longer for FHIR server
     sleep 5
@@ -272,9 +254,7 @@ if [ "$DETACHED" = true ] && [ "$WAIT" = true ]; then
 
     if [[ "$PROFILE" == *"admin"* ]] || [[ "$PROFILE" == *"all"* ]]; then
         wait_for_service "MongoDB Express" "http://localhost:8081" || true
-        if [[ "$PROFILE" == *"redis"* ]] || [[ "$PROFILE" == *"all"* ]]; then
-            wait_for_service "Redis Commander" "http://localhost:8082" || true
-        fi
+        wait_for_service "Redis Commander" "http://localhost:8082" || true
     fi
 
     if [[ "$PROFILE" == *"monitoring"* ]] || [[ "$PROFILE" == *"all"* ]]; then
