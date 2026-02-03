@@ -80,7 +80,7 @@ echo -e "${NC}"
 # Container Status
 echo -e "${CYAN}Container Status:${NC}"
 echo "─────────────────────────────────────────────────────────────────"
-$COMPOSE_CMD --profile admin --profile monitoring ps 2>/dev/null || echo "No containers running"
+$COMPOSE_CMD --profile admin --profile monitoring --profile redis ps 2>/dev/null || echo "No containers running"
 echo ""
 
 # Service Health

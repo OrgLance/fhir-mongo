@@ -123,7 +123,7 @@ if [ -n "$SERVICE" ]; then
         $COMPOSE_CMD build $SERVICE
     fi
 
-    $COMPOSE_CMD --profile admin --profile monitoring restart $SERVICE
+    $COMPOSE_CMD --profile admin --profile monitoring --profile redis restart $SERVICE
 else
     log_info "Restarting all services..."
 
@@ -132,7 +132,7 @@ else
         $COMPOSE_CMD build
     fi
 
-    $COMPOSE_CMD --profile admin --profile monitoring restart
+    $COMPOSE_CMD --profile admin --profile monitoring --profile redis restart
 fi
 
 echo ""

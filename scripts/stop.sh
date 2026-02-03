@@ -109,7 +109,7 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 
 # Build command
-CMD="$COMPOSE_CMD --profile admin --profile monitoring down"
+CMD="$COMPOSE_CMD --profile admin --profile monitoring --profile redis down"
 
 if [ "$REMOVE_VOLUMES" = true ]; then
     CMD="$CMD -v"

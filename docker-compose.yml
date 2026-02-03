@@ -31,7 +31,7 @@ services:
         reservations:
           memory: 512M
 
-  # Redis Cache
+  # Redis Cache (optional - disabled by default)
   redis:
     image: redis:7.2-alpine
     container_name: fhir-redis
@@ -55,6 +55,8 @@ services:
           memory: 512M
         reservations:
           memory: 128M
+    profiles:
+      - redis
 
   # FHIR Spring Boot Application
   fhir-server:
@@ -72,10 +74,11 @@ services:
       # MongoDB Pool Settings
       MONGO_POOL_MAX_SIZE: 200
       MONGO_POOL_MIN_SIZE: 20
-      # Redis Configuration
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ""
+      # Redis disabled - using in-memory cache
+      # To enable Redis, start with: docker-compose --profile redis up
+      # REDIS_HOST: redis
+      # REDIS_PORT: 6379
+      # REDIS_PASSWORD: ""
       # FHIR Settings
       FHIR_BASE_URL: http://localhost:8080/fhir
       # Async Pool Settings
@@ -93,8 +96,9 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+      # Redis disabled - uncomment to enable
+      # redis:
+      #   condition: service_healthy
     networks:
       - fhir-network
     healthcheck:
@@ -131,7 +135,7 @@ services:
     profiles:
       - admin
 
-  # Redis Commander - Web-based Redis Admin (optional)
+  # Redis Commander - Web-based Redis Admin (optional, requires redis profile)
   redis-commander:
     image: rediscommander/redis-commander:latest
     container_name: fhir-redis-commander
@@ -148,7 +152,7 @@ services:
     networks:
       - fhir-network
     profiles:
-      - admin
+      - redis
 
   # Prometheus - Metrics Collection (optional)
   prometheus:
