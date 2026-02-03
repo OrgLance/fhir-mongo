@@ -50,6 +50,22 @@ check_port() {
     fi
 }
 
+check_redis() {
+    if docker exec fhir-redis redis-cli -a fhirRedis@2024 ping 2>/dev/null | grep -q "PONG"; then
+        echo -e "${GREEN}●${NC} UP"
+    else
+        echo -e "${RED}●${NC} DOWN"
+    fi
+}
+
+check_mongo() {
+    if docker exec fhir-mongodb mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null | grep -q "ok"; then
+        echo -e "${GREEN}●${NC} UP"
+    else
+        echo -e "${RED}●${NC} DOWN"
+    fi
+}
+
 format_bytes() {
     local bytes=$1
     if [ $bytes -ge 1073741824 ]; then
@@ -89,8 +105,8 @@ echo "────────────────────────�
 printf "  %-20s %-10s %s\n" "Service" "Port" "Status"
 echo "  ─────────────────────────────────────────────────────────────"
 printf "  %-20s %-10s %s\n" "FHIR Server" "8080" "$(check_service 'fhir' 'http://localhost:8080/actuator/health')"
-printf "  %-20s %-10s %s\n" "MongoDB" "27017" "$(check_port 27017)"
-printf "  %-20s %-10s %s\n" "Redis" "6379" "$(check_port 6379)"
+printf "  %-20s %-10s %s\n" "MongoDB" "27017" "$(check_mongo)"
+printf "  %-20s %-10s %s\n" "Redis" "6379" "$(check_redis)"
 printf "  %-20s %-10s %s\n" "MongoDB Express" "8081" "$(check_service 'mongo-express' 'http://localhost:8081')"
 printf "  %-20s %-10s %s\n" "Redis Commander" "8082" "$(check_service 'redis-commander' 'http://localhost:8082')"
 printf "  %-20s %-10s %s\n" "Prometheus" "9090" "$(check_service 'prometheus' 'http://localhost:9090')"

@@ -114,6 +114,44 @@ wait_for_service() {
     return 1
 }
 
+wait_for_redis() {
+    local max_attempts=30
+    local attempt=1
+
+    echo -n "  Waiting for Redis"
+    while [ $attempt -le $max_attempts ]; do
+        # Use docker exec to check Redis via redis-cli with password
+        if docker exec fhir-redis redis-cli -a fhirRedis@2024 ping 2>/dev/null | grep -q "PONG"; then
+            echo -e " ${GREEN}✓${NC}"
+            return 0
+        fi
+        echo -n "."
+        sleep 2
+        ((attempt++))
+    done
+    echo -e " ${RED}✗${NC}"
+    return 1
+}
+
+wait_for_mongo() {
+    local max_attempts=30
+    local attempt=1
+
+    echo -n "  Waiting for MongoDB"
+    while [ $attempt -le $max_attempts ]; do
+        # Use docker exec to check MongoDB
+        if docker exec fhir-mongodb mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null | grep -q "ok"; then
+            echo -e " ${GREEN}✓${NC}"
+            return 0
+        fi
+        echo -n "."
+        sleep 2
+        ((attempt++))
+    done
+    echo -e " ${RED}✗${NC}"
+    return 1
+}
+
 print_services() {
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
@@ -245,8 +283,8 @@ if [ "$DETACHED" = true ] && [ "$WAIT" = true ]; then
     log_info "Waiting for services to be healthy..."
     echo ""
 
-    wait_for_service "MongoDB" "http://localhost:27017" || true
-    wait_for_service "Redis" "http://localhost:6379" || true
+    wait_for_mongo || true
+    wait_for_redis || true
 
     # Wait longer for FHIR server
     sleep 5
