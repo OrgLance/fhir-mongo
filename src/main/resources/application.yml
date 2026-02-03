@@ -28,9 +28,16 @@ management:
 springdoc:
   api-docs:
     path: /api-docs
+    enabled: true
   swagger-ui:
     path: /swagger-ui.html
     operationsSorter: method
+    tagsSorter: alpha
+    displayRequestDuration: true
+    tryItOutEnabled: true
+  packages-to-scan: com.fhir.controller
+  paths-to-match: /**
+  show-actuator: true
 
 logging:
   level:
