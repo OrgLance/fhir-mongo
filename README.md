@@ -30,20 +30,131 @@ git clone <repository-url>
 cd fhirSpringboot
 
 # Start all services
-docker-compose up -d
+./scripts/start.sh
 
-# Check logs
-docker-compose logs -f fhir-server
+# Or with all admin & monitoring tools
+./scripts/start.sh --all
+
+# Check status
+./scripts/status.sh
+
+# View logs
+./scripts/logs.sh
 ```
 
 ### Start Locally
 
 ```bash
-# Start MongoDB and Redis
+# Start MongoDB and Redis only
 docker-compose up -d mongodb redis
 
 # Run the application
 mvn spring-boot:run
+```
+
+---
+
+## Shell Scripts
+
+All scripts are located in the `scripts/` directory:
+
+| Script | Description |
+|--------|-------------|
+| `start.sh` | Start services with various profiles |
+| `stop.sh` | Stop services (optionally remove data) |
+| `status.sh` | Show status of all services |
+| `logs.sh` | View service logs |
+| `restart.sh` | Restart services |
+| `build.sh` | Build Maven project and Docker image |
+
+### Start Script
+
+```bash
+# Basic start (MongoDB + Redis + FHIR Server)
+./scripts/start.sh
+
+# Start with admin UIs
+./scripts/start.sh --admin
+
+# Start with monitoring (Prometheus + Grafana)
+./scripts/start.sh --monitoring
+
+# Start all services
+./scripts/start.sh --all
+
+# Rebuild and start
+./scripts/start.sh --all --build
+
+# Run in foreground (see logs)
+./scripts/start.sh --foreground
+```
+
+### Stop Script
+
+```bash
+# Stop services (keep data)
+./scripts/stop.sh
+
+# Stop and remove all data
+./scripts/stop.sh --volumes
+
+# Complete cleanup
+./scripts/stop.sh --all
+```
+
+### Status Script
+
+```bash
+# Show status of all services
+./scripts/status.sh
+```
+
+### Logs Script
+
+```bash
+# Follow all logs
+./scripts/logs.sh
+
+# Follow FHIR server logs
+./scripts/logs.sh fhir
+
+# Show last 50 lines of MongoDB logs
+./scripts/logs.sh mongo -n 50
+
+# Show logs without following
+./scripts/logs.sh --no-follow
+```
+
+### Restart Script
+
+```bash
+# Restart all services
+./scripts/restart.sh
+
+# Restart only FHIR server
+./scripts/restart.sh fhir
+
+# Rebuild and restart
+./scripts/restart.sh fhir --build
+```
+
+### Build Script
+
+```bash
+# Full build (Maven + Docker)
+./scripts/build.sh
+
+# Build without tests
+./scripts/build.sh --skip-tests
+
+# Clean build
+./scripts/build.sh --clean
+
+# Maven only
+./scripts/build.sh --maven-only
+
+# Docker only
+./scripts/build.sh --docker-only
 ```
 
 ## Access URLs
