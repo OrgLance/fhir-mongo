@@ -4,27 +4,38 @@ import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.parser.IParser;
 import com.fhir.exception.FhirResourceNotFoundException;
 import com.fhir.exception.FhirValidationException;
+import com.fhir.metrics.FhirMetrics;
+import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.model.FhirResourceHistory;
 import com.fhir.repository.FhirResourceHistoryRepository;
 import com.fhir.repository.FhirResourceRepository;
+import com.fhir.util.CompressionUtil;
+import io.micrometer.core.instrument.Timer;
 import org.bson.Document;
+import org.bson.types.ObjectId;
 import org.hl7.fhir.instance.model.api.IBaseResource;
 import org.hl7.fhir.r4.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
+import org.springframework.data.domain.*;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
+/**
+ * FHIR Resource Service with caching, metrics, and cursor-based pagination.
+ * Optimized for handling billions of records.
+ */
 @Service
 public class FhirResourceService {
 
@@ -39,6 +50,9 @@ public class FhirResourceService {
     @Autowired
     private FhirContext fhirContext;
 
+    @Autowired
+    private FhirMetrics metrics;
+
     @Value("${fhir.server.base-url}")
     private String baseUrl;
 
@@ -48,50 +62,85 @@ public class FhirResourceService {
     @Value("${fhir.server.max-page-size:100}")
     private int maxPageSize;
 
+    @Value("${fhir.compression.enabled:true}")
+    private boolean compressionEnabled;
+
+    // ========== CREATE ==========
+
+    @CacheEvict(value = "counts", key = "#root.target.getResourceTypeFromResource(#resource)")
     public <T extends IBaseResource> T create(T resource) {
+        Timer.Sample timer = metrics.startTimer();
         String resourceType = fhirContext.getResourceType(resource);
         String resourceId = generateResourceId();
 
-        if (resource instanceof Resource) {
-            ((Resource) resource).setId(resourceId);
-            Meta meta = ((Resource) resource).getMeta();
-            if (meta == null) {
-                meta = new Meta();
-                ((Resource) resource).setMeta(meta);
+        try {
+            if (resource instanceof Resource) {
+                ((Resource) resource).setId(resourceId);
+                Meta meta = ((Resource) resource).getMeta();
+                if (meta == null) {
+                    meta = new Meta();
+                    ((Resource) resource).setMeta(meta);
+                }
+                meta.setVersionId("1");
+                meta.setLastUpdated(Date.from(Instant.now()));
             }
-            meta.setVersionId("1");
-            meta.setLastUpdated(Date.from(Instant.now()));
+
+            IParser jsonParser = fhirContext.newJsonParser();
+            String resourceJson = jsonParser.encodeResourceToString(resource);
+
+            FhirResourceDocument doc = FhirResourceDocument.builder()
+                    .resourceType(resourceType)
+                    .resourceId(resourceId)
+                    .resourceJson(resourceJson)
+                    .resourceData(Document.parse(resourceJson))
+                    .versionId(1L)
+                    .lastUpdated(Instant.now())
+                    .createdAt(Instant.now())
+                    .active(true)
+                    .deleted(false)
+                    .build();
+
+            // Apply compression for large resources
+            if (compressionEnabled && CompressionUtil.shouldCompress(resourceJson)) {
+                doc.setCompressedJson(CompressionUtil.compress(resourceJson));
+                doc.setIsCompressed(true);
+                logger.debug("Compressed {} resource, savings: {}%",
+                        resourceType, CompressionUtil.savingsPercent(
+                                resourceJson.length(), doc.getCompressedJson().length));
+            } else {
+                doc.setIsCompressed(false);
+            }
+
+            resourceRepository.save(doc);
+
+            // Save history asynchronously
+            saveHistoryAsync(resourceType, resourceId, 1L, resourceJson, "CREATE");
+
+            metrics.recordCreate(resourceType);
+            logger.info("Created {} with id: {}", resourceType, resourceId);
+            return resource;
+        } finally {
+            metrics.recordCreateLatency(timer);
         }
-
-        IParser jsonParser = fhirContext.newJsonParser();
-        String resourceJson = jsonParser.encodeResourceToString(resource);
-
-        FhirResourceDocument doc = FhirResourceDocument.builder()
-                .resourceType(resourceType)
-                .resourceId(resourceId)
-                .resourceJson(resourceJson)
-                .resourceData(Document.parse(resourceJson))
-                .versionId(1L)
-                .lastUpdated(Instant.now())
-                .createdAt(Instant.now())
-                .active(true)
-                .deleted(false)
-                .build();
-
-        resourceRepository.save(doc);
-
-        saveHistory(resourceType, resourceId, 1L, resourceJson, "CREATE");
-
-        logger.info("Created {} with id: {}", resourceType, resourceId);
-        return resource;
     }
 
-    public <T extends IBaseResource> T read(String resourceType, String resourceId) {
-        FhirResourceDocument doc = resourceRepository
-                .findByResourceTypeAndResourceIdAndDeletedFalse(resourceType, resourceId)
-                .orElseThrow(() -> new FhirResourceNotFoundException(resourceType, resourceId));
+    // ========== READ ==========
 
-        return parseResource(doc.getResourceJson());
+    @Cacheable(value = "resources", key = "#resourceType + ':' + #resourceId",
+               unless = "#result == null")
+    public <T extends IBaseResource> T read(String resourceType, String resourceId) {
+        Timer.Sample timer = metrics.startTimer();
+
+        try {
+            FhirResourceDocument doc = resourceRepository
+                    .findByResourceTypeAndResourceIdAndDeletedFalse(resourceType, resourceId)
+                    .orElseThrow(() -> new FhirResourceNotFoundException(resourceType, resourceId));
+
+            metrics.recordRead(resourceType);
+            return parseResourceFromDocument(doc);
+        } finally {
+            metrics.recordReadLatency(timer);
+        }
     }
 
     public <T extends IBaseResource> T vread(String resourceType, String resourceId, String versionId) {
@@ -100,64 +149,92 @@ public class FhirResourceService {
                 .findByResourceTypeAndResourceIdAndVersionId(resourceType, resourceId, version)
                 .orElseThrow(() -> new FhirResourceNotFoundException(resourceType, resourceId + "/_history/" + versionId));
 
-        return parseResource(history.getResourceJson());
+        return parseResourceFromHistory(history);
     }
 
+    // ========== UPDATE ==========
+
+    @Caching(evict = {
+            @CacheEvict(value = "resources", key = "#resourceType + ':' + #resourceId"),
+            @CacheEvict(value = "counts", key = "#resourceType")
+    })
     @Transactional
     public <T extends IBaseResource> T update(String resourceType, String resourceId, T resource) {
-        FhirResourceDocument existingDoc = resourceRepository
-                .findByResourceTypeAndResourceId(resourceType, resourceId)
-                .orElse(null);
+        Timer.Sample timer = metrics.startTimer();
 
-        Long newVersion;
-        Instant now = Instant.now();
+        try {
+            FhirResourceDocument existingDoc = resourceRepository
+                    .findByResourceTypeAndResourceId(resourceType, resourceId)
+                    .orElse(null);
 
-        if (existingDoc == null) {
-            newVersion = 1L;
+            Long newVersion;
+            Instant now = Instant.now();
+
+            if (existingDoc == null) {
+                newVersion = 1L;
+                if (resource instanceof Resource) {
+                    ((Resource) resource).setId(resourceId);
+                }
+            } else {
+                if (existingDoc.getDeleted() != null && existingDoc.getDeleted()) {
+                    throw new FhirValidationException("Cannot update a deleted resource");
+                }
+                newVersion = existingDoc.getVersionId() + 1;
+            }
+
             if (resource instanceof Resource) {
-                ((Resource) resource).setId(resourceId);
+                Meta meta = ((Resource) resource).getMeta();
+                if (meta == null) {
+                    meta = new Meta();
+                    ((Resource) resource).setMeta(meta);
+                }
+                meta.setVersionId(String.valueOf(newVersion));
+                meta.setLastUpdated(Date.from(now));
             }
-        } else {
-            if (existingDoc.getDeleted() != null && existingDoc.getDeleted()) {
-                throw new FhirValidationException("Cannot update a deleted resource");
+
+            IParser jsonParser = fhirContext.newJsonParser();
+            String resourceJson = jsonParser.encodeResourceToString(resource);
+
+            FhirResourceDocument doc = FhirResourceDocument.builder()
+                    .id(existingDoc != null ? existingDoc.getId() : null)
+                    .resourceType(resourceType)
+                    .resourceId(resourceId)
+                    .resourceJson(resourceJson)
+                    .resourceData(Document.parse(resourceJson))
+                    .versionId(newVersion)
+                    .lastUpdated(now)
+                    .createdAt(existingDoc != null ? existingDoc.getCreatedAt() : now)
+                    .active(true)
+                    .deleted(false)
+                    .build();
+
+            // Apply compression
+            if (compressionEnabled && CompressionUtil.shouldCompress(resourceJson)) {
+                doc.setCompressedJson(CompressionUtil.compress(resourceJson));
+                doc.setIsCompressed(true);
+            } else {
+                doc.setIsCompressed(false);
             }
-            newVersion = existingDoc.getVersionId() + 1;
+
+            resourceRepository.save(doc);
+
+            // Save history asynchronously
+            saveHistoryAsync(resourceType, resourceId, newVersion, resourceJson, "UPDATE");
+
+            metrics.recordUpdate(resourceType);
+            logger.info("Updated {} with id: {} to version: {}", resourceType, resourceId, newVersion);
+            return resource;
+        } finally {
+            metrics.recordUpdateLatency(timer);
         }
-
-        if (resource instanceof Resource) {
-            Meta meta = ((Resource) resource).getMeta();
-            if (meta == null) {
-                meta = new Meta();
-                ((Resource) resource).setMeta(meta);
-            }
-            meta.setVersionId(String.valueOf(newVersion));
-            meta.setLastUpdated(Date.from(now));
-        }
-
-        IParser jsonParser = fhirContext.newJsonParser();
-        String resourceJson = jsonParser.encodeResourceToString(resource);
-
-        FhirResourceDocument doc = FhirResourceDocument.builder()
-                .id(existingDoc != null ? existingDoc.getId() : null)
-                .resourceType(resourceType)
-                .resourceId(resourceId)
-                .resourceJson(resourceJson)
-                .resourceData(Document.parse(resourceJson))
-                .versionId(newVersion)
-                .lastUpdated(now)
-                .createdAt(existingDoc != null ? existingDoc.getCreatedAt() : now)
-                .active(true)
-                .deleted(false)
-                .build();
-
-        resourceRepository.save(doc);
-
-        saveHistory(resourceType, resourceId, newVersion, resourceJson, "UPDATE");
-
-        logger.info("Updated {} with id: {} to version: {}", resourceType, resourceId, newVersion);
-        return resource;
     }
 
+    // ========== DELETE ==========
+
+    @Caching(evict = {
+            @CacheEvict(value = "resources", key = "#resourceType + ':' + #resourceId"),
+            @CacheEvict(value = "counts", key = "#resourceType")
+    })
     @Transactional
     public void delete(String resourceType, String resourceId) {
         FhirResourceDocument doc = resourceRepository
@@ -171,20 +248,111 @@ public class FhirResourceService {
 
         resourceRepository.save(doc);
 
-        saveHistory(resourceType, resourceId, doc.getVersionId(), doc.getResourceJson(), "DELETE");
+        // Save history asynchronously
+        saveHistoryAsync(resourceType, resourceId, doc.getVersionId(), doc.getResourceJson(), "DELETE");
 
+        metrics.recordDelete(resourceType);
         logger.info("Deleted {} with id: {}", resourceType, resourceId);
     }
 
+    // ========== SEARCH (Offset-based - for backwards compatibility) ==========
+
     public Bundle search(String resourceType, Map<String, String> searchParams, int page, int count) {
-        int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
-        Pageable pageable = PageRequest.of(page, pageSize, Sort.by(Sort.Direction.DESC, "lastUpdated"));
+        Timer.Sample timer = metrics.startTimer();
 
-        Page<FhirResourceDocument> results = resourceRepository
-                .findByResourceTypeAndDeletedFalse(resourceType, pageable);
+        try {
+            int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
+            Pageable pageable = PageRequest.of(page, pageSize, Sort.by(Sort.Direction.DESC, "lastUpdated"));
 
-        return createSearchBundle(results, resourceType, searchParams, page, pageSize);
+            Page<FhirResourceDocument> results = resourceRepository
+                    .findByResourceTypeAndDeletedFalse(resourceType, pageable);
+
+            metrics.recordSearch(resourceType, results.getNumberOfElements());
+            return createSearchBundle(results, resourceType, searchParams, page, pageSize);
+        } finally {
+            metrics.recordSearchLatency(timer);
+        }
     }
+
+    // ========== CURSOR-BASED SEARCH (O(1) pagination) ==========
+
+    /**
+     * Cursor-based search for efficient pagination with billions of records.
+     * Performance is O(1) regardless of how deep into the result set.
+     *
+     * @param resourceType The FHIR resource type
+     * @param cursor       The cursor (last ID from previous page), null for first page
+     * @param count        Number of results per page
+     * @return CursorPage with results and navigation cursors
+     */
+    public CursorPage<FhirResourceDocument> searchWithCursor(String resourceType, String cursor, int count) {
+        int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
+        Pageable pageable = PageRequest.of(0, pageSize + 1, Sort.by(Sort.Direction.ASC, "_id"));
+
+        Slice<FhirResourceDocument> results;
+
+        if (cursor == null || cursor.isEmpty()) {
+            // First page
+            results = resourceRepository.findSliceByResourceTypeAndDeletedFalse(resourceType, pageable);
+        } else {
+            // Subsequent pages - use cursor
+            ObjectId cursorId = new ObjectId(cursor);
+            results = resourceRepository.findByResourceTypeAfterCursor(resourceType, cursorId, pageable);
+        }
+
+        List<FhirResourceDocument> content = results.getContent();
+        boolean hasNext = content.size() > pageSize;
+
+        if (hasNext) {
+            content = content.subList(0, pageSize);
+        }
+
+        String nextCursor = hasNext && !content.isEmpty()
+                ? content.get(content.size() - 1).getId()
+                : null;
+
+        return CursorPage.of(content, hasNext, nextCursor);
+    }
+
+    /**
+     * Search with cursor and return as FHIR Bundle.
+     */
+    public Bundle searchWithCursorAsBundle(String resourceType, String cursor, int count) {
+        CursorPage<FhirResourceDocument> cursorPage = searchWithCursor(resourceType, cursor, count);
+
+        Bundle bundle = new Bundle();
+        bundle.setType(Bundle.BundleType.SEARCHSET);
+        bundle.setTimestamp(Date.from(Instant.now()));
+
+        for (FhirResourceDocument doc : cursorPage.getContent()) {
+            Bundle.BundleEntryComponent entry = bundle.addEntry();
+            entry.setFullUrl(baseUrl + "/" + doc.getResourceType() + "/" + doc.getResourceId());
+
+            IBaseResource resource = parseResourceFromDocument(doc);
+            entry.setResource((Resource) resource);
+
+            Bundle.BundleEntrySearchComponent search = new Bundle.BundleEntrySearchComponent();
+            search.setMode(Bundle.SearchEntryMode.MATCH);
+            entry.setSearch(search);
+        }
+
+        // Add cursor-based pagination links
+        String selfLink = baseUrl + "/" + resourceType + "?_count=" + count;
+        if (cursor != null) {
+            selfLink += "&_cursor=" + cursor;
+        }
+        bundle.addLink().setRelation("self").setUrl(selfLink);
+
+        if (cursorPage.isHasNext()) {
+            bundle.addLink().setRelation("next")
+                    .setUrl(baseUrl + "/" + resourceType + "?_count=" + count +
+                            "&_cursor=" + cursorPage.getNextCursor());
+        }
+
+        return bundle;
+    }
+
+    // ========== SYSTEM SEARCH ==========
 
     public Bundle searchAll(Map<String, String> searchParams, int page, int count) {
         int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
@@ -194,6 +362,8 @@ public class FhirResourceService {
 
         return createSystemSearchBundle(results, searchParams, page, pageSize);
     }
+
+    // ========== HISTORY ==========
 
     public Bundle history(String resourceType, String resourceId, int page, int count) {
         int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
@@ -211,7 +381,7 @@ public class FhirResourceService {
             Bundle.BundleEntryComponent entry = bundle.addEntry();
             entry.setFullUrl(baseUrl + "/" + resourceType + "/" + resourceId + "/_history/" + history.getVersionId());
 
-            IBaseResource resource = parseResource(history.getResourceJson());
+            IBaseResource resource = parseResourceFromHistory(history);
             entry.setResource((Resource) resource);
 
             Bundle.BundleEntryRequestComponent request = new Bundle.BundleEntryRequestComponent();
@@ -247,7 +417,7 @@ public class FhirResourceService {
             Bundle.BundleEntryComponent entry = bundle.addEntry();
             entry.setFullUrl(baseUrl + "/" + doc.getResourceType() + "/" + doc.getResourceId());
 
-            IBaseResource resource = parseResource(doc.getResourceJson());
+            IBaseResource resource = parseResourceFromDocument(doc);
             entry.setResource((Resource) resource);
         }
 
@@ -256,27 +426,38 @@ public class FhirResourceService {
         return bundle;
     }
 
+    // ========== TRANSACTION ==========
+
     public Bundle transaction(Bundle transactionBundle) {
-        if (transactionBundle.getType() != Bundle.BundleType.TRANSACTION &&
-                transactionBundle.getType() != Bundle.BundleType.BATCH) {
-            throw new FhirValidationException("Bundle type must be 'transaction' or 'batch'");
+        Timer.Sample timer = metrics.startTimer();
+
+        try {
+            if (transactionBundle.getType() != Bundle.BundleType.TRANSACTION &&
+                    transactionBundle.getType() != Bundle.BundleType.BATCH) {
+                throw new FhirValidationException("Bundle type must be 'transaction' or 'batch'");
+            }
+
+            Bundle responseBundle = new Bundle();
+            responseBundle.setType(transactionBundle.getType() == Bundle.BundleType.TRANSACTION ?
+                    Bundle.BundleType.TRANSACTIONRESPONSE : Bundle.BundleType.BATCHRESPONSE);
+            responseBundle.setTimestamp(Date.from(Instant.now()));
+
+            Map<String, String> idMappings = new HashMap<>();
+
+            for (Bundle.BundleEntryComponent entry : transactionBundle.getEntry()) {
+                Bundle.BundleEntryComponent responseEntry = processTransactionEntry(entry, idMappings);
+                responseBundle.addEntry(responseEntry);
+            }
+
+            return responseBundle;
+        } finally {
+            metrics.recordTransactionLatency(timer);
         }
-
-        Bundle responseBundle = new Bundle();
-        responseBundle.setType(transactionBundle.getType() == Bundle.BundleType.TRANSACTION ?
-                Bundle.BundleType.TRANSACTIONRESPONSE : Bundle.BundleType.BATCHRESPONSE);
-        responseBundle.setTimestamp(Date.from(Instant.now()));
-
-        Map<String, String> idMappings = new HashMap<>();
-
-        for (Bundle.BundleEntryComponent entry : transactionBundle.getEntry()) {
-            Bundle.BundleEntryComponent responseEntry = processTransactionEntry(entry, idMappings);
-            responseBundle.addEntry(responseEntry);
-        }
-
-        return responseBundle;
     }
 
+    // ========== CAPABILITY STATEMENT ==========
+
+    @Cacheable(value = "metadata", key = "'capability-statement'")
     public CapabilityStatement getCapabilityStatement() {
         CapabilityStatement cs = new CapabilityStatement();
         cs.setId("fhir-server-capability-statement");
@@ -289,27 +470,51 @@ public class FhirResourceService {
 
         cs.setSoftware(new CapabilityStatement.CapabilityStatementSoftwareComponent()
                 .setName("FHIR Spring Boot Server")
-                .setVersion("1.0.0"));
+                .setVersion("2.0.0"));
 
         cs.setImplementation(new CapabilityStatement.CapabilityStatementImplementationComponent()
-                .setDescription("FHIR R4 Server with MongoDB backend")
+                .setDescription("High-Performance FHIR R4 Server with MongoDB - Optimized for billions of records")
                 .setUrl(baseUrl));
 
         CapabilityStatement.CapabilityStatementRestComponent rest = cs.addRest();
         rest.setMode(CapabilityStatement.RestfulCapabilityMode.SERVER);
 
+        // All FHIR R4 resource types
         String[] resourceTypes = {
-                "Patient", "Practitioner", "PractitionerRole", "Organization", "Location",
-                "Encounter", "Condition", "Observation", "DiagnosticReport", "Procedure",
-                "MedicationRequest", "Medication", "MedicationAdministration", "MedicationStatement",
-                "AllergyIntolerance", "Immunization", "CarePlan", "CareTeam", "Goal",
-                "ServiceRequest", "Appointment", "Schedule", "Slot", "Coverage", "Claim",
-                "ClaimResponse", "ExplanationOfBenefit", "DocumentReference", "Binary",
-                "Composition", "Bundle", "OperationOutcome", "ValueSet", "CodeSystem",
-                "ConceptMap", "StructureDefinition", "SearchParameter", "CapabilityStatement",
-                "Task", "Communication", "CommunicationRequest", "Device", "DeviceRequest",
-                "Specimen", "ImagingStudy", "Media", "QuestionnaireResponse", "Questionnaire",
-                "Consent", "Contract", "Person", "RelatedPerson", "Group", "HealthcareService"
+                "Account", "ActivityDefinition", "AdverseEvent", "AllergyIntolerance", "Appointment",
+                "AppointmentResponse", "AuditEvent", "Basic", "Binary", "BiologicallyDerivedProduct",
+                "BodyStructure", "Bundle", "CapabilityStatement", "CarePlan", "CareTeam",
+                "CatalogEntry", "ChargeItem", "ChargeItemDefinition", "Claim", "ClaimResponse",
+                "ClinicalImpression", "CodeSystem", "Communication", "CommunicationRequest",
+                "CompartmentDefinition", "Composition", "ConceptMap", "Condition", "Consent",
+                "Contract", "Coverage", "CoverageEligibilityRequest", "CoverageEligibilityResponse",
+                "DetectedIssue", "Device", "DeviceDefinition", "DeviceMetric", "DeviceRequest",
+                "DeviceUseStatement", "DiagnosticReport", "DocumentManifest", "DocumentReference",
+                "EffectEvidenceSynthesis", "Encounter", "Endpoint", "EnrollmentRequest",
+                "EnrollmentResponse", "EpisodeOfCare", "EventDefinition", "Evidence", "EvidenceVariable",
+                "ExampleScenario", "ExplanationOfBenefit", "FamilyMemberHistory", "Flag", "Goal",
+                "GraphDefinition", "Group", "GuidanceResponse", "HealthcareService", "ImagingStudy",
+                "Immunization", "ImmunizationEvaluation", "ImmunizationRecommendation",
+                "ImplementationGuide", "InsurancePlan", "Invoice", "Library", "Linkage", "List",
+                "Location", "Measure", "MeasureReport", "Media", "Medication", "MedicationAdministration",
+                "MedicationDispense", "MedicationKnowledge", "MedicationRequest", "MedicationStatement",
+                "MedicinalProduct", "MedicinalProductAuthorization", "MedicinalProductContraindication",
+                "MedicinalProductIndication", "MedicinalProductIngredient", "MedicinalProductInteraction",
+                "MedicinalProductManufactured", "MedicinalProductPackaged", "MedicinalProductPharmaceutical",
+                "MedicinalProductUndesirableEffect", "MessageDefinition", "MessageHeader",
+                "MolecularSequence", "NamingSystem", "NutritionOrder", "Observation",
+                "ObservationDefinition", "OperationDefinition", "OperationOutcome", "Organization",
+                "OrganizationAffiliation", "Parameters", "Patient", "PaymentNotice",
+                "PaymentReconciliation", "Person", "PlanDefinition", "Practitioner", "PractitionerRole",
+                "Procedure", "Provenance", "Questionnaire", "QuestionnaireResponse", "RelatedPerson",
+                "RequestGroup", "ResearchDefinition", "ResearchElementDefinition", "ResearchStudy",
+                "ResearchSubject", "RiskAssessment", "RiskEvidenceSynthesis", "Schedule",
+                "SearchParameter", "ServiceRequest", "Slot", "Specimen", "SpecimenDefinition",
+                "StructureDefinition", "StructureMap", "Subscription", "Substance",
+                "SubstanceNucleicAcid", "SubstancePolymer", "SubstanceProtein",
+                "SubstanceReferenceInformation", "SubstanceSourceMaterial", "SubstanceSpecification",
+                "SupplyDelivery", "SupplyRequest", "Task", "TerminologyCapabilities", "TestReport",
+                "TestScript", "ValueSet", "VerificationResult", "VisionPrescription"
         };
 
         for (String resourceType : resourceTypes) {
@@ -349,6 +554,9 @@ public class FhirResourceService {
         return cs;
     }
 
+    // ========== UTILITY METHODS ==========
+
+    @Cacheable(value = "counts", key = "#resourceType")
     public long getResourceCount(String resourceType) {
         return resourceRepository.countByResourceTypeAndDeletedFalse(resourceType);
     }
@@ -356,6 +564,43 @@ public class FhirResourceService {
     public boolean resourceExists(String resourceType, String resourceId) {
         return resourceRepository.existsByResourceTypeAndResourceId(resourceType, resourceId);
     }
+
+    /**
+     * Helper method for SpEL expression in @CacheEvict
+     */
+    public String getResourceTypeFromResource(IBaseResource resource) {
+        return fhirContext.getResourceType(resource);
+    }
+
+    // ========== ASYNC HISTORY SAVING ==========
+
+    @Async("historyTaskExecutor")
+    public CompletableFuture<Void> saveHistoryAsync(String resourceType, String resourceId,
+                                                     Long versionId, String resourceJson, String action) {
+        FhirResourceHistory history = FhirResourceHistory.builder()
+                .resourceType(resourceType)
+                .resourceId(resourceId)
+                .versionId(versionId)
+                .resourceJson(resourceJson)
+                .timestamp(Instant.now())
+                .action(action)
+                .build();
+
+        // Apply compression for history records too
+        if (compressionEnabled && CompressionUtil.shouldCompress(resourceJson)) {
+            history.setCompressedJson(CompressionUtil.compress(resourceJson));
+            history.setIsCompressed(true);
+        } else {
+            history.setIsCompressed(false);
+        }
+
+        historyRepository.save(history);
+        logger.debug("Saved history for {} {} version {}", resourceType, resourceId, versionId);
+
+        return CompletableFuture.completedFuture(null);
+    }
+
+    // ========== PRIVATE METHODS ==========
 
     private Bundle.BundleEntryComponent processTransactionEntry(
             Bundle.BundleEntryComponent entry,
@@ -421,22 +666,31 @@ public class FhirResourceService {
                     .setCode(OperationOutcome.IssueType.PROCESSING)
                     .setDiagnostics(e.getMessage());
             responseEntry.setResource(outcome);
+            metrics.recordError("transaction", e.getClass().getSimpleName());
         }
 
         responseEntry.setResponse(response);
         return responseEntry;
     }
 
-    private void saveHistory(String resourceType, String resourceId, Long versionId, String resourceJson, String action) {
-        FhirResourceHistory history = FhirResourceHistory.builder()
-                .resourceType(resourceType)
-                .resourceId(resourceId)
-                .versionId(versionId)
-                .resourceJson(resourceJson)
-                .timestamp(Instant.now())
-                .action(action)
-                .build();
-        historyRepository.save(history);
+    private <T extends IBaseResource> T parseResourceFromDocument(FhirResourceDocument doc) {
+        String json;
+        if (doc.getIsCompressed() != null && doc.getIsCompressed() && doc.getCompressedJson() != null) {
+            json = CompressionUtil.decompress(doc.getCompressedJson());
+        } else {
+            json = doc.getResourceJson();
+        }
+        return parseResource(json);
+    }
+
+    private <T extends IBaseResource> T parseResourceFromHistory(FhirResourceHistory history) {
+        String json;
+        if (history.getIsCompressed() != null && history.getIsCompressed() && history.getCompressedJson() != null) {
+            json = CompressionUtil.decompress(history.getCompressedJson());
+        } else {
+            json = history.getResourceJson();
+        }
+        return parseResource(json);
     }
 
     private Bundle createSearchBundle(Page<FhirResourceDocument> results, String resourceType,
@@ -450,7 +704,7 @@ public class FhirResourceService {
             Bundle.BundleEntryComponent entry = bundle.addEntry();
             entry.setFullUrl(baseUrl + "/" + doc.getResourceType() + "/" + doc.getResourceId());
 
-            IBaseResource resource = parseResource(doc.getResourceJson());
+            IBaseResource resource = parseResourceFromDocument(doc);
             entry.setResource((Resource) resource);
 
             Bundle.BundleEntrySearchComponent search = new Bundle.BundleEntrySearchComponent();
@@ -474,7 +728,7 @@ public class FhirResourceService {
             Bundle.BundleEntryComponent entry = bundle.addEntry();
             entry.setFullUrl(baseUrl + "/" + doc.getResourceType() + "/" + doc.getResourceId());
 
-            IBaseResource resource = parseResource(doc.getResourceJson());
+            IBaseResource resource = parseResourceFromDocument(doc);
             entry.setResource((Resource) resource);
         }
 
