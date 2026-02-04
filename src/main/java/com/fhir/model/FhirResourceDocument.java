@@ -6,51 +6,18 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.bson.Document;
 import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.index.CompoundIndex;
-import org.springframework.data.mongodb.core.index.CompoundIndexes;
-import org.springframework.data.mongodb.core.index.Indexed;
-import org.springframework.data.mongodb.core.index.TextIndexed;
 import org.springframework.data.mongodb.core.mapping.Field;
 
 import java.time.Instant;
 
 /**
  * MongoDB document for storing FHIR resources.
- * Optimized with compound indexes for billion-record scale.
+ *
+ * Each resource type is stored in its own collection (e.g., "patient", "observation").
+ * Collection name is determined dynamically by DynamicFhirResourceRepository.
+ * Indexes are created per collection for optimal performance.
  */
-@org.springframework.data.mongodb.core.mapping.Document(collection = "fhir_resources")
-@CompoundIndexes({
-        // Primary lookup - unique resource identifier
-        @CompoundIndex(name = "resource_lookup",
-                       def = "{'resourceType': 1, 'resourceId': 1}",
-                       unique = true),
-
-        // CRITICAL: Search queries with deleted filter (most common query pattern)
-        @CompoundIndex(name = "resource_type_deleted",
-                       def = "{'resourceType': 1, 'deleted': 1}"),
-
-        // Search with sorting by lastUpdated (covers 90% of search queries)
-        @CompoundIndex(name = "resource_type_deleted_updated",
-                       def = "{'resourceType': 1, 'deleted': 1, 'lastUpdated': -1}"),
-
-        // Active resources query optimization
-        @CompoundIndex(name = "resource_active_updated",
-                       def = "{'resourceType': 1, 'active': 1, 'lastUpdated': -1}"),
-
-        // Cursor-based pagination support (O(1) performance)
-        @CompoundIndex(name = "cursor_pagination",
-                       def = "{'resourceType': 1, 'deleted': 1, '_id': 1}"),
-
-        // Patient reference lookup (common FHIR query)
-        @CompoundIndex(name = "patient_reference",
-                       def = "{'resourceType': 1, 'resourceData.subject.reference': 1, 'deleted': 1}",
-                       sparse = true),
-
-        // Code/coding lookup (Observation, Condition queries)
-        @CompoundIndex(name = "coding_lookup",
-                       def = "{'resourceType': 1, 'resourceData.code.coding.system': 1, 'resourceData.code.coding.code': 1, 'deleted': 1}",
-                       sparse = true)
-})
+@org.springframework.data.mongodb.core.mapping.Document
 @Data
 @Builder
 @NoArgsConstructor
@@ -60,16 +27,12 @@ public class FhirResourceDocument {
     @Id
     private String id;
 
-    @Indexed
     @Field("resourceType")
     private String resourceType;
 
-    @Indexed
     @Field("resourceId")
     private String resourceId;
 
-    // Full-text search support
-    @TextIndexed(weight = 2)
     @Field("resourceJson")
     private String resourceJson;
 
@@ -79,20 +42,15 @@ public class FhirResourceDocument {
     @Field("versionId")
     private Long versionId;
 
-    @Indexed
     @Field("lastUpdated")
     private Instant lastUpdated;
 
     @Field("createdAt")
     private Instant createdAt;
 
-    // Index on active for filtering
-    @Indexed
     @Field("active")
     private Boolean active;
 
-    // CRITICAL: Index on deleted - used in almost every query
-    @Indexed
     @Field("deleted")
     private Boolean deleted;
 

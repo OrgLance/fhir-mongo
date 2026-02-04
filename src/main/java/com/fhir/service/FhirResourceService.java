@@ -8,8 +8,8 @@ import com.fhir.metrics.FhirMetrics;
 import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.model.FhirResourceHistory;
+import com.fhir.repository.DynamicFhirResourceRepository;
 import com.fhir.repository.FhirResourceHistoryRepository;
-import com.fhir.repository.FhirResourceRepository;
 import com.fhir.util.CompressionUtil;
 import io.micrometer.core.instrument.Timer;
 import org.bson.Document;
@@ -42,7 +42,7 @@ public class FhirResourceService {
     private static final Logger logger = LoggerFactory.getLogger(FhirResourceService.class);
 
     @Autowired
-    private FhirResourceRepository resourceRepository;
+    private DynamicFhirResourceRepository resourceRepository;
 
     @Autowired
     private FhirResourceHistoryRepository historyRepository;
@@ -358,7 +358,7 @@ public class FhirResourceService {
         int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
         Pageable pageable = PageRequest.of(page, pageSize, Sort.by(Sort.Direction.DESC, "lastUpdated"));
 
-        Page<FhirResourceDocument> results = resourceRepository.findByDeletedFalse(pageable);
+        Page<FhirResourceDocument> results = resourceRepository.findAllByDeletedFalse(pageable);
 
         return createSystemSearchBundle(results, searchParams, page, pageSize);
     }

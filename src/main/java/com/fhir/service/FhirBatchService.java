@@ -55,10 +55,11 @@ public class FhirBatchService {
 
     /**
      * Bulk insert resources with optimal performance.
+     * Groups documents by resource type and inserts into respective collections.
      * Uses unordered bulk operations for maximum throughput.
      *
      * @param documents List of documents to insert
-     * @return BulkWriteResult with insert statistics
+     * @return BulkWriteResult with insert statistics (combined)
      */
     public BulkWriteResult bulkInsert(List<FhirResourceDocument> documents) {
         if (documents == null || documents.isEmpty()) {
@@ -68,26 +69,45 @@ public class FhirBatchService {
         logger.info("Starting bulk insert of {} documents", documents.size());
         long startTime = System.currentTimeMillis();
 
-        BulkOperations bulkOps = mongoTemplate.bulkOps(
-                BulkOperations.BulkMode.UNORDERED,
-                FhirResourceDocument.class
-        );
-
+        // Group documents by resource type
+        Map<String, List<FhirResourceDocument>> byType = new HashMap<>();
         for (FhirResourceDocument doc : documents) {
-            bulkOps.insert(doc);
+            byType.computeIfAbsent(doc.getResourceType(), k -> new ArrayList<>()).add(doc);
         }
 
-        BulkWriteResult result = bulkOps.execute();
+        int totalInserted = 0;
+        BulkWriteResult lastResult = null;
+
+        // Insert each group into its respective collection
+        for (Map.Entry<String, List<FhirResourceDocument>> entry : byType.entrySet()) {
+            String collectionName = entry.getKey().toLowerCase();
+
+            BulkOperations bulkOps = mongoTemplate.bulkOps(
+                    BulkOperations.BulkMode.UNORDERED,
+                    FhirResourceDocument.class,
+                    collectionName
+            );
+
+            for (FhirResourceDocument doc : entry.getValue()) {
+                bulkOps.insert(doc);
+            }
+
+            lastResult = bulkOps.execute();
+            totalInserted += lastResult.getInsertedCount();
+
+            logger.debug("Bulk inserted {} {} documents into collection '{}'",
+                    lastResult.getInsertedCount(), entry.getKey(), collectionName);
+        }
 
         long duration = System.currentTimeMillis() - startTime;
         double docsPerSecond = documents.size() / (duration / 1000.0);
 
         logger.info("Bulk insert completed: {} documents in {}ms ({} docs/sec)",
-                result.getInsertedCount(), duration, String.format("%.0f", docsPerSecond));
+                totalInserted, duration, String.format("%.0f", docsPerSecond));
 
-        metrics.recordBulkOperation("insert", result.getInsertedCount());
+        metrics.recordBulkOperation("insert", totalInserted);
 
-        return result;
+        return lastResult;
     }
 
     /**
