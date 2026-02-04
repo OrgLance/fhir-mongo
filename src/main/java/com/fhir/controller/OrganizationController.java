@@ -1,20 +1,30 @@
 package com.fhir.controller;
 
 import ca.uhn.fhir.context.FhirContext;
+import com.fhir.model.FhirResourceDocument;
 import com.fhir.service.FhirResourceService;
+import com.fhir.service.FhirSearchService;
+import com.fhir.util.CompressionUtil;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.hl7.fhir.instance.model.api.IBaseResource;
 import org.hl7.fhir.r4.model.Bundle;
 import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/organizations")
@@ -26,6 +36,9 @@ public class OrganizationController {
 
     @Autowired
     private FhirResourceService resourceService;
+
+    @Autowired
+    private FhirSearchService searchService;
 
     @Autowired
     private FhirContext fhirContext;
@@ -62,11 +75,42 @@ public class OrganizationController {
     @Operation(summary = "Search Organizations", description = "Search all Organizations")
     public ResponseEntity<String> search(
             @RequestParam(value = "_page", defaultValue = "0") int page,
-            @RequestParam(value = "_count", defaultValue = "20") int count) {
+            @RequestParam(value = "_count", defaultValue = "20") int count,
+            @Parameter(description = "Organization name") @RequestParam(required = false) String name,
+            @Parameter(description = "Organization type") @RequestParam(required = false) String type,
+            @Parameter(description = "Identifier") @RequestParam(required = false) String identifier,
+            @Parameter(description = "Address") @RequestParam(required = false) String address,
+            @Parameter(description = "Address city") @RequestParam(value = "address-city", required = false) String addressCity,
+            @Parameter(description = "Address state") @RequestParam(value = "address-state", required = false) String addressState,
+            @Parameter(description = "Part of organization") @RequestParam(required = false) String partof,
+            @Parameter(description = "Active status") @RequestParam(required = false) String active) {
 
         logger.debug("Searching Organizations");
 
-        Bundle bundle = resourceService.search(RESOURCE_TYPE, new HashMap<>(), page, count);
+        Map<String, String> searchParams = new HashMap<>();
+        if (name != null) searchParams.put("name", name);
+        if (type != null) searchParams.put("type", type);
+        if (identifier != null) searchParams.put("identifier", identifier);
+        if (address != null) searchParams.put("address", address);
+        if (addressCity != null) searchParams.put("address-city", addressCity);
+        if (addressState != null) searchParams.put("address-state", addressState);
+        if (partof != null) searchParams.put("partof", partof);
+        if (active != null) searchParams.put("active", active);
+
+        if (searchParams.isEmpty()) {
+            Bundle bundle = resourceService.search(RESOURCE_TYPE, searchParams, page, count);
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(fhirContext.newJsonParser().encodeResourceToString(bundle));
+        }
+
+        Page<FhirResourceDocument> results = searchService.search(
+                RESOURCE_TYPE,
+                searchParams,
+                PageRequest.of(page, count, Sort.by(Sort.Direction.DESC, "lastUpdated"))
+        );
+
+        Bundle bundle = createSearchBundle(results);
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
@@ -97,5 +141,32 @@ public class OrganizationController {
         resourceService.delete(RESOURCE_TYPE, id);
 
         return ResponseEntity.noContent().build();
+    }
+
+    private Bundle createSearchBundle(Page<FhirResourceDocument> results) {
+        Bundle bundle = new Bundle();
+        bundle.setType(Bundle.BundleType.SEARCHSET);
+        bundle.setTotal((int) results.getTotalElements());
+
+        for (FhirResourceDocument doc : results.getContent()) {
+            Bundle.BundleEntryComponent entry = bundle.addEntry();
+            String json = getResourceJson(doc);
+            IBaseResource resource = fhirContext.newJsonParser().parseResource(json);
+            entry.setResource((Resource) resource);
+            entry.setFullUrl("/api/organizations/" + doc.getResourceId());
+
+            Bundle.BundleEntrySearchComponent search = new Bundle.BundleEntrySearchComponent();
+            search.setMode(Bundle.SearchEntryMode.MATCH);
+            entry.setSearch(search);
+        }
+
+        return bundle;
+    }
+
+    private String getResourceJson(FhirResourceDocument doc) {
+        if (doc.getIsCompressed() != null && doc.getIsCompressed() && doc.getCompressedJson() != null) {
+            return CompressionUtil.decompress(doc.getCompressedJson());
+        }
+        return doc.getResourceJson();
     }
 }

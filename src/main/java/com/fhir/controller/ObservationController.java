@@ -1,21 +1,30 @@
 package com.fhir.controller;
 
 import ca.uhn.fhir.context.FhirContext;
+import com.fhir.model.FhirResourceDocument;
 import com.fhir.service.FhirResourceService;
+import com.fhir.service.FhirSearchService;
+import com.fhir.util.CompressionUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.hl7.fhir.instance.model.api.IBaseResource;
 import org.hl7.fhir.r4.model.Bundle;
 import org.hl7.fhir.r4.model.Observation;
+import org.hl7.fhir.r4.model.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/observations")
@@ -27,6 +36,9 @@ public class ObservationController {
 
     @Autowired
     private FhirResourceService resourceService;
+
+    @Autowired
+    private FhirSearchService searchService;
 
     @Autowired
     private FhirContext fhirContext;
@@ -66,15 +78,66 @@ public class ObservationController {
             @RequestParam(value = "_count", defaultValue = "20") int count,
             @Parameter(description = "Patient reference") @RequestParam(required = false) String patient,
             @Parameter(description = "Observation code") @RequestParam(required = false) String code,
-            @Parameter(description = "Category") @RequestParam(required = false) String category) {
+            @Parameter(description = "Category") @RequestParam(required = false) String category,
+            @Parameter(description = "Subject reference") @RequestParam(required = false) String subject,
+            @Parameter(description = "Encounter reference") @RequestParam(required = false) String encounter,
+            @Parameter(description = "Date") @RequestParam(required = false) String date) {
 
         logger.debug("Searching Observations");
 
-        Bundle bundle = resourceService.search(RESOURCE_TYPE, new HashMap<>(), page, count);
+        Map<String, String> searchParams = new HashMap<>();
+        if (patient != null) searchParams.put("patient", patient);
+        if (code != null) searchParams.put("code", code);
+        if (category != null) searchParams.put("category", category);
+        if (subject != null) searchParams.put("subject", subject);
+        if (encounter != null) searchParams.put("encounter", encounter);
+        if (date != null) searchParams.put("date", date);
+
+        if (searchParams.isEmpty()) {
+            Bundle bundle = resourceService.search(RESOURCE_TYPE, searchParams, page, count);
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(fhirContext.newJsonParser().encodeResourceToString(bundle));
+        }
+
+        Page<FhirResourceDocument> results = searchService.search(
+                RESOURCE_TYPE,
+                searchParams,
+                PageRequest.of(page, count, Sort.by(Sort.Direction.DESC, "lastUpdated"))
+        );
+
+        Bundle bundle = createSearchBundle(results);
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(fhirContext.newJsonParser().encodeResourceToString(bundle));
+    }
+
+    private Bundle createSearchBundle(Page<FhirResourceDocument> results) {
+        Bundle bundle = new Bundle();
+        bundle.setType(Bundle.BundleType.SEARCHSET);
+        bundle.setTotal((int) results.getTotalElements());
+
+        for (FhirResourceDocument doc : results.getContent()) {
+            Bundle.BundleEntryComponent entry = bundle.addEntry();
+            String json = getResourceJson(doc);
+            IBaseResource resource = fhirContext.newJsonParser().parseResource(json);
+            entry.setResource((Resource) resource);
+            entry.setFullUrl("/api/observations/" + doc.getResourceId());
+
+            Bundle.BundleEntrySearchComponent search = new Bundle.BundleEntrySearchComponent();
+            search.setMode(Bundle.SearchEntryMode.MATCH);
+            entry.setSearch(search);
+        }
+
+        return bundle;
+    }
+
+    private String getResourceJson(FhirResourceDocument doc) {
+        if (doc.getIsCompressed() != null && doc.getIsCompressed() && doc.getCompressedJson() != null) {
+            return CompressionUtil.decompress(doc.getCompressedJson());
+        }
+        return doc.getResourceJson();
     }
 
     @PutMapping(value = "/{id}", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)

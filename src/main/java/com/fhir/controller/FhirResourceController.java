@@ -4,6 +4,7 @@ import ca.uhn.fhir.context.FhirContext;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.service.FhirResourceService;
 import com.fhir.service.FhirSearchService;
+import com.fhir.util.CompressionUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -257,7 +258,10 @@ public class FhirResourceController {
 
         for (FhirResourceDocument doc : results.getContent()) {
             Bundle.BundleEntryComponent entry = bundle.addEntry();
-            IBaseResource resource = fhirContext.newJsonParser().parseResource(doc.getResourceJson());
+
+            // Handle compressed resources
+            String json = getResourceJson(doc);
+            IBaseResource resource = fhirContext.newJsonParser().parseResource(json);
             entry.setResource((Resource) resource);
             entry.setFullUrl("/fhir/" + resourceType + "/" + doc.getResourceId());
 
@@ -267,5 +271,15 @@ public class FhirResourceController {
         }
 
         return bundle;
+    }
+
+    /**
+     * Get resource JSON, handling compression if needed.
+     */
+    private String getResourceJson(FhirResourceDocument doc) {
+        if (doc.getIsCompressed() != null && doc.getIsCompressed() && doc.getCompressedJson() != null) {
+            return CompressionUtil.decompress(doc.getCompressedJson());
+        }
+        return doc.getResourceJson();
     }
 }

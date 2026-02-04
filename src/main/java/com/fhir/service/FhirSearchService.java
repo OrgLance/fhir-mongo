@@ -1,8 +1,6 @@
 package com.fhir.service;
 
 import com.fhir.model.FhirResourceDocument;
-import com.fhir.repository.FhirResourceRepository;
-import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +20,10 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * FHIR Search Service - supports search parameters for all resource types.
+ * Uses dynamic collection names based on resource type.
+ */
 @Service
 public class FhirSearchService {
 
@@ -31,15 +33,30 @@ public class FhirSearchService {
     @Autowired
     private MongoTemplate mongoTemplate;
 
-    @Autowired
-    private FhirResourceRepository resourceRepository;
+    /**
+     * Get collection name for a resource type (lowercase)
+     */
+    private String getCollectionName(String resourceType) {
+        return resourceType.toLowerCase();
+    }
 
+    /**
+     * Search for resources with parameters
+     */
     public Page<FhirResourceDocument> search(String resourceType, Map<String, String> params, Pageable pageable) {
+        String collectionName = getCollectionName(resourceType);
         Query query = buildQuery(resourceType, params);
         query.with(pageable);
 
-        List<FhirResourceDocument> results = mongoTemplate.find(query, FhirResourceDocument.class);
-        long total = mongoTemplate.count(Query.of(query).limit(-1).skip(-1), FhirResourceDocument.class);
+        logger.debug("Searching in collection '{}' with query: {}", collectionName, query);
+
+        List<FhirResourceDocument> results = mongoTemplate.find(query, FhirResourceDocument.class, collectionName);
+
+        // Get total count for pagination
+        Query countQuery = Query.of(query).limit(-1).skip(-1);
+        long total = mongoTemplate.count(countQuery, FhirResourceDocument.class, collectionName);
+
+        logger.debug("Found {} results (total: {}) in collection '{}'", results.size(), total, collectionName);
 
         return new PageImpl<>(results, pageable, total);
     }
@@ -48,12 +65,17 @@ public class FhirSearchService {
         Query query = new Query();
 
         List<Criteria> criteriaList = new ArrayList<>();
-        criteriaList.add(Criteria.where("resourceType").is(resourceType));
+        // Always filter out deleted resources
         criteriaList.add(Criteria.where("deleted").is(false));
 
         for (Map.Entry<String, String> entry : params.entrySet()) {
             String paramName = entry.getKey();
             String paramValue = entry.getValue();
+
+            // Skip pagination parameters
+            if (paramName.equals("_page") || paramName.equals("_count") || paramName.equals("_sort")) {
+                continue;
+            }
 
             if (paramName.startsWith("_")) {
                 handleSystemParameter(criteriaList, paramName, paramValue);
@@ -62,7 +84,10 @@ public class FhirSearchService {
             }
         }
 
-        query.addCriteria(new Criteria().andOperator(criteriaList.toArray(new Criteria[0])));
+        if (!criteriaList.isEmpty()) {
+            query.addCriteria(new Criteria().andOperator(criteriaList.toArray(new Criteria[0])));
+        }
+
         return query;
     }
 
@@ -121,6 +146,7 @@ public class FhirSearchService {
             return Criteria.where(fullPath).in(Arrays.asList(values));
         }
 
+        // Default: case-insensitive prefix match
         return Criteria.where(fullPath).regex("^" + Pattern.quote(value), "i");
     }
 
@@ -198,12 +224,14 @@ public class FhirSearchService {
             return commonMappings.get(paramName);
         }
 
+        // Default: use parameter name as field path
         return paramName;
     }
 
     private Map<String, Map<String, String>> getSearchParamMappings() {
         Map<String, Map<String, String>> mappings = new HashMap<>();
 
+        // Common parameters for all resources
         Map<String, String> common = new HashMap<>();
         common.put("_id", "id");
         common.put("_lastUpdated", "meta.lastUpdated");
@@ -211,6 +239,7 @@ public class FhirSearchService {
         common.put("status", "status");
         mappings.put("*", common);
 
+        // Patient search parameters
         Map<String, String> patient = new HashMap<>();
         patient.put("name", "name.family");
         patient.put("family", "name.family");
@@ -230,6 +259,7 @@ public class FhirSearchService {
         patient.put("deceased", "deceasedBoolean");
         mappings.put("Patient", patient);
 
+        // Practitioner search parameters
         Map<String, String> practitioner = new HashMap<>();
         practitioner.put("name", "name.family");
         practitioner.put("family", "name.family");
@@ -241,6 +271,7 @@ public class FhirSearchService {
         practitioner.put("communication", "communication.coding.code");
         mappings.put("Practitioner", practitioner);
 
+        // Organization search parameters
         Map<String, String> organization = new HashMap<>();
         organization.put("name", "name");
         organization.put("type", "type.coding.code");
@@ -251,6 +282,7 @@ public class FhirSearchService {
         organization.put("active", "active");
         mappings.put("Organization", organization);
 
+        // Encounter search parameters
         Map<String, String> encounter = new HashMap<>();
         encounter.put("patient", "subject.reference");
         encounter.put("subject", "subject.reference");
@@ -263,6 +295,7 @@ public class FhirSearchService {
         encounter.put("reason-code", "reasonCode.coding.code");
         mappings.put("Encounter", encounter);
 
+        // Observation search parameters
         Map<String, String> observation = new HashMap<>();
         observation.put("patient", "subject.reference");
         observation.put("subject", "subject.reference");
@@ -275,6 +308,7 @@ public class FhirSearchService {
         observation.put("encounter", "encounter.reference");
         mappings.put("Observation", observation);
 
+        // Condition search parameters
         Map<String, String> condition = new HashMap<>();
         condition.put("patient", "subject.reference");
         condition.put("subject", "subject.reference");
@@ -289,12 +323,14 @@ public class FhirSearchService {
         condition.put("asserter", "asserter.reference");
         mappings.put("Condition", condition);
 
+        // Medication search parameters
         Map<String, String> medication = new HashMap<>();
         medication.put("code", "code.coding.code");
         medication.put("form", "form.coding.code");
         medication.put("manufacturer", "manufacturer.reference");
         mappings.put("Medication", medication);
 
+        // MedicationRequest search parameters
         Map<String, String> medicationRequest = new HashMap<>();
         medicationRequest.put("patient", "subject.reference");
         medicationRequest.put("subject", "subject.reference");
@@ -307,6 +343,7 @@ public class FhirSearchService {
         medicationRequest.put("priority", "priority");
         mappings.put("MedicationRequest", medicationRequest);
 
+        // Procedure search parameters
         Map<String, String> procedure = new HashMap<>();
         procedure.put("patient", "subject.reference");
         procedure.put("subject", "subject.reference");
@@ -318,6 +355,7 @@ public class FhirSearchService {
         procedure.put("category", "category.coding.code");
         mappings.put("Procedure", procedure);
 
+        // DiagnosticReport search parameters
         Map<String, String> diagnosticReport = new HashMap<>();
         diagnosticReport.put("patient", "subject.reference");
         diagnosticReport.put("subject", "subject.reference");
@@ -330,6 +368,7 @@ public class FhirSearchService {
         diagnosticReport.put("conclusion", "conclusion");
         mappings.put("DiagnosticReport", diagnosticReport);
 
+        // Immunization search parameters
         Map<String, String> immunization = new HashMap<>();
         immunization.put("patient", "patient.reference");
         immunization.put("vaccine-code", "vaccineCode.coding.code");
@@ -340,6 +379,7 @@ public class FhirSearchService {
         immunization.put("reason-code", "reasonCode.coding.code");
         mappings.put("Immunization", immunization);
 
+        // AllergyIntolerance search parameters
         Map<String, String> allergyIntolerance = new HashMap<>();
         allergyIntolerance.put("patient", "patient.reference");
         allergyIntolerance.put("code", "code.coding.code");
@@ -353,6 +393,7 @@ public class FhirSearchService {
         allergyIntolerance.put("onset", "onsetDateTime");
         mappings.put("AllergyIntolerance", allergyIntolerance);
 
+        // Appointment search parameters
         Map<String, String> appointment = new HashMap<>();
         appointment.put("patient", "participant.actor.reference");
         appointment.put("actor", "participant.actor.reference");
@@ -364,6 +405,123 @@ public class FhirSearchService {
         appointment.put("practitioner", "participant.actor.reference");
         appointment.put("reason-code", "reasonCode.coding.code");
         mappings.put("Appointment", appointment);
+
+        // CarePlan search parameters
+        Map<String, String> carePlan = new HashMap<>();
+        carePlan.put("patient", "subject.reference");
+        carePlan.put("subject", "subject.reference");
+        carePlan.put("category", "category.coding.code");
+        carePlan.put("date", "period.start");
+        carePlan.put("encounter", "encounter.reference");
+        carePlan.put("intent", "intent");
+        carePlan.put("activity-code", "activity.detail.code.coding.code");
+        mappings.put("CarePlan", carePlan);
+
+        // CareTeam search parameters
+        Map<String, String> careTeam = new HashMap<>();
+        careTeam.put("patient", "subject.reference");
+        careTeam.put("subject", "subject.reference");
+        careTeam.put("category", "category.coding.code");
+        careTeam.put("participant", "participant.member.reference");
+        careTeam.put("encounter", "encounter.reference");
+        mappings.put("CareTeam", careTeam);
+
+        // Claim search parameters
+        Map<String, String> claim = new HashMap<>();
+        claim.put("patient", "patient.reference");
+        claim.put("provider", "provider.reference");
+        claim.put("created", "created");
+        claim.put("priority", "priority.coding.code");
+        claim.put("use", "use");
+        claim.put("insurer", "insurer.reference");
+        mappings.put("Claim", claim);
+
+        // Coverage search parameters
+        Map<String, String> coverage = new HashMap<>();
+        coverage.put("patient", "beneficiary.reference");
+        coverage.put("beneficiary", "beneficiary.reference");
+        coverage.put("payor", "payor.reference");
+        coverage.put("subscriber", "subscriber.reference");
+        coverage.put("type", "type.coding.code");
+        mappings.put("Coverage", coverage);
+
+        // DocumentReference search parameters
+        Map<String, String> documentReference = new HashMap<>();
+        documentReference.put("patient", "subject.reference");
+        documentReference.put("subject", "subject.reference");
+        documentReference.put("type", "type.coding.code");
+        documentReference.put("category", "category.coding.code");
+        documentReference.put("date", "date");
+        documentReference.put("author", "author.reference");
+        documentReference.put("custodian", "custodian.reference");
+        documentReference.put("encounter", "context.encounter.reference");
+        mappings.put("DocumentReference", documentReference);
+
+        // Goal search parameters
+        Map<String, String> goal = new HashMap<>();
+        goal.put("patient", "subject.reference");
+        goal.put("subject", "subject.reference");
+        goal.put("category", "category.coding.code");
+        goal.put("lifecycle-status", "lifecycleStatus");
+        goal.put("target-date", "target.dueDate");
+        goal.put("achievement-status", "achievementStatus.coding.code");
+        mappings.put("Goal", goal);
+
+        // ServiceRequest search parameters
+        Map<String, String> serviceRequest = new HashMap<>();
+        serviceRequest.put("patient", "subject.reference");
+        serviceRequest.put("subject", "subject.reference");
+        serviceRequest.put("code", "code.coding.code");
+        serviceRequest.put("category", "category.coding.code");
+        serviceRequest.put("encounter", "encounter.reference");
+        serviceRequest.put("requester", "requester.reference");
+        serviceRequest.put("performer", "performer.reference");
+        serviceRequest.put("authored", "authoredOn");
+        serviceRequest.put("intent", "intent");
+        serviceRequest.put("priority", "priority");
+        mappings.put("ServiceRequest", serviceRequest);
+
+        // Location search parameters
+        Map<String, String> location = new HashMap<>();
+        location.put("name", "name");
+        location.put("address", "address.line");
+        location.put("address-city", "address.city");
+        location.put("address-state", "address.state");
+        location.put("type", "type.coding.code");
+        location.put("organization", "managingOrganization.reference");
+        location.put("partof", "partOf.reference");
+        mappings.put("Location", location);
+
+        // Device search parameters
+        Map<String, String> device = new HashMap<>();
+        device.put("patient", "patient.reference");
+        device.put("type", "type.coding.code");
+        device.put("manufacturer", "manufacturer");
+        device.put("model", "modelNumber");
+        device.put("udi-carrier", "udiCarrier.carrierHRF");
+        device.put("location", "location.reference");
+        device.put("organization", "owner.reference");
+        mappings.put("Device", device);
+
+        // Specimen search parameters
+        Map<String, String> specimen = new HashMap<>();
+        specimen.put("patient", "subject.reference");
+        specimen.put("subject", "subject.reference");
+        specimen.put("type", "type.coding.code");
+        specimen.put("collected", "collection.collectedDateTime");
+        specimen.put("collector", "collection.collector.reference");
+        specimen.put("bodysite", "collection.bodySite.coding.code");
+        mappings.put("Specimen", specimen);
+
+        // Media search parameters
+        Map<String, String> media = new HashMap<>();
+        media.put("patient", "subject.reference");
+        media.put("subject", "subject.reference");
+        media.put("type", "type.coding.code");
+        media.put("created", "createdDateTime");
+        media.put("encounter", "encounter.reference");
+        media.put("operator", "operator.reference");
+        mappings.put("Media", media);
 
         return mappings;
     }
