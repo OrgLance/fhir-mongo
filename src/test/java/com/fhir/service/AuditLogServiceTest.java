@@ -17,6 +17,7 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -187,6 +188,111 @@ class AuditLogServiceTest {
             assertNotNull(AuditAction.TRANSACTION);
             assertNotNull(AuditAction.BATCH);
             assertNotNull(AuditAction.VALIDATE);
+        }
+    }
+
+    @Nested
+    @DisplayName("Change Detection Tests")
+    class ChangeDetectionTests {
+
+        @Test
+        @DisplayName("Should detect added field")
+        void shouldDetectAddedField() {
+            String oldJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"name\":[{\"family\":\"Smith\"}]}";
+            String newJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"name\":[{\"family\":\"Smith\"}],\"gender\":\"male\"}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(oldJson, newJson);
+
+            assertTrue(changes.containsKey("gender"));
+            assertEquals(AuditLog.FieldChange.ChangeType.ADDED, changes.get("gender").getChangeType());
+            assertEquals("male", changes.get("gender").getNewValue());
+            assertNull(changes.get("gender").getOldValue());
+        }
+
+        @Test
+        @DisplayName("Should detect removed field")
+        void shouldDetectRemovedField() {
+            String oldJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"gender\":\"male\"}";
+            String newJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\"}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(oldJson, newJson);
+
+            assertTrue(changes.containsKey("gender"));
+            assertEquals(AuditLog.FieldChange.ChangeType.REMOVED, changes.get("gender").getChangeType());
+            assertEquals("male", changes.get("gender").getOldValue());
+            assertNull(changes.get("gender").getNewValue());
+        }
+
+        @Test
+        @DisplayName("Should detect modified field")
+        void shouldDetectModifiedField() {
+            String oldJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"gender\":\"male\"}";
+            String newJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"gender\":\"female\"}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(oldJson, newJson);
+
+            assertTrue(changes.containsKey("gender"));
+            assertEquals(AuditLog.FieldChange.ChangeType.MODIFIED, changes.get("gender").getChangeType());
+            assertEquals("male", changes.get("gender").getOldValue());
+            assertEquals("female", changes.get("gender").getNewValue());
+        }
+
+        @Test
+        @DisplayName("Should ignore meta field in changes")
+        void shouldIgnoreMetaField() {
+            String oldJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"meta\":{\"versionId\":\"1\"}}";
+            String newJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"meta\":{\"versionId\":\"2\"}}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(oldJson, newJson);
+
+            assertFalse(changes.containsKey("meta"));
+        }
+
+        @Test
+        @DisplayName("Should ignore id field in changes")
+        void shouldIgnoreIdField() {
+            String oldJson = "{\"resourceType\":\"Patient\",\"id\":\"old-id\"}";
+            String newJson = "{\"resourceType\":\"Patient\",\"id\":\"new-id\"}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(oldJson, newJson);
+
+            assertFalse(changes.containsKey("id"));
+        }
+
+        @Test
+        @DisplayName("Should detect multiple changes")
+        void shouldDetectMultipleChanges() {
+            String oldJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"gender\":\"male\",\"birthDate\":\"1990-01-01\"}";
+            String newJson = "{\"resourceType\":\"Patient\",\"id\":\"p-123\",\"gender\":\"female\",\"active\":true}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(oldJson, newJson);
+
+            assertEquals(3, changes.size());
+            assertTrue(changes.containsKey("gender")); // Modified
+            assertTrue(changes.containsKey("birthDate")); // Removed
+            assertTrue(changes.containsKey("active")); // Added
+        }
+
+        @Test
+        @DisplayName("Should return empty map when no changes")
+        void shouldReturnEmptyMapWhenNoChanges() {
+            String json = "{\"resourceType\":\"Patient\",\"gender\":\"male\"}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(json, json);
+
+            assertTrue(changes.isEmpty());
+        }
+
+        @Test
+        @DisplayName("Should handle complex nested objects")
+        void shouldHandleComplexNestedObjects() {
+            String oldJson = "{\"resourceType\":\"Patient\",\"name\":[{\"family\":\"Smith\",\"given\":[\"John\"]}]}";
+            String newJson = "{\"resourceType\":\"Patient\",\"name\":[{\"family\":\"Doe\",\"given\":[\"Jane\"]}]}";
+
+            Map<String, AuditLog.FieldChange> changes = auditLogService.computeChanges(oldJson, newJson);
+
+            assertTrue(changes.containsKey("name"));
+            assertEquals(AuditLog.FieldChange.ChangeType.MODIFIED, changes.get("name").getChangeType());
         }
     }
 

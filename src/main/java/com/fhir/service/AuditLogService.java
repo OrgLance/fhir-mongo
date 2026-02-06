@@ -3,6 +3,11 @@ package com.fhir.service;
 import com.fhir.model.AuditLog;
 import com.fhir.model.AuditLog.AuditAction;
 import com.fhir.model.AuditLog.AuditMetadata;
+import com.fhir.model.AuditLog.FieldChange;
+import com.fhir.model.AuditLog.FieldChange.ChangeType;
+import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.CreateCollectionOptions;
@@ -20,6 +25,8 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -42,6 +49,9 @@ public class AuditLogService {
     private static final String AUDIT_COLLECTION_PREFIX = "audit_";
     private static final String TIME_FIELD = "timestamp";
     private static final String META_FIELD = "metadata";
+    private static final Set<String> IGNORED_FIELDS = Set.of("meta", "id");
+
+    private final Gson gson = new Gson();
 
     @Autowired
     private MongoTemplate mongoTemplate;
@@ -243,14 +253,25 @@ public class AuditLogService {
     }
 
     /**
-     * Log a CREATE operation.
+     * Log a CREATE operation with the new resource value.
+     */
+    @Async("auditTaskExecutor")
+    public CompletableFuture<Void> logCreate(String resourceType, String resourceId, Long versionId,
+                                              String actor, String source, Long durationMs,
+                                              String newValue) {
+        AuditLog log = createAuditLog(resourceType, resourceId, AuditAction.CREATE,
+                versionId, actor, source, "POST", "/" + resourceType, 201, durationMs);
+        log.setNewValue(newValue);
+        return logAsync(log);
+    }
+
+    /**
+     * Log a CREATE operation (without storing the value - for backward compatibility).
      */
     @Async("auditTaskExecutor")
     public CompletableFuture<Void> logCreate(String resourceType, String resourceId, Long versionId,
                                               String actor, String source, Long durationMs) {
-        AuditLog log = createAuditLog(resourceType, resourceId, AuditAction.CREATE,
-                versionId, actor, source, "POST", "/" + resourceType, 201, durationMs);
-        return logAsync(log);
+        return logCreate(resourceType, resourceId, versionId, actor, source, durationMs, null);
     }
 
     /**
@@ -265,25 +286,60 @@ public class AuditLogService {
     }
 
     /**
-     * Log an UPDATE operation.
+     * Log an UPDATE operation with old and new resource values.
+     * Computes and stores the diff between old and new values.
      */
     @Async("auditTaskExecutor")
     public CompletableFuture<Void> logUpdate(String resourceType, String resourceId, Long versionId,
-                                              String actor, String source, Long durationMs) {
+                                              String actor, String source, Long durationMs,
+                                              String oldValue, String newValue) {
         AuditLog log = createAuditLog(resourceType, resourceId, AuditAction.UPDATE,
                 versionId, actor, source, "PUT", "/" + resourceType + "/" + resourceId, 200, durationMs);
+        log.setOldValue(oldValue);
+        log.setNewValue(newValue);
+
+        // Compute changes between old and new values
+        if (oldValue != null && newValue != null) {
+            try {
+                Map<String, FieldChange> changes = computeChanges(oldValue, newValue);
+                log.setChanges(changes);
+            } catch (Exception e) {
+                logger.warn("Failed to compute changes for audit log: {}", e.getMessage());
+            }
+        }
+
         return logAsync(log);
     }
 
     /**
-     * Log a DELETE operation.
+     * Log an UPDATE operation (without storing values - for backward compatibility).
+     */
+    @Async("auditTaskExecutor")
+    public CompletableFuture<Void> logUpdate(String resourceType, String resourceId, Long versionId,
+                                              String actor, String source, Long durationMs) {
+        return logUpdate(resourceType, resourceId, versionId, actor, source, durationMs, null, null);
+    }
+
+    /**
+     * Log a DELETE operation with the old resource value.
+     */
+    @Async("auditTaskExecutor")
+    public CompletableFuture<Void> logDelete(String resourceType, String resourceId,
+                                              String actor, String source, Long durationMs,
+                                              String oldValue) {
+        AuditLog log = createAuditLog(resourceType, resourceId, AuditAction.DELETE,
+                null, actor, source, "DELETE", "/" + resourceType + "/" + resourceId, 204, durationMs);
+        log.setOldValue(oldValue);
+        return logAsync(log);
+    }
+
+    /**
+     * Log a DELETE operation (without storing values - for backward compatibility).
      */
     @Async("auditTaskExecutor")
     public CompletableFuture<Void> logDelete(String resourceType, String resourceId,
                                               String actor, String source, Long durationMs) {
-        AuditLog log = createAuditLog(resourceType, resourceId, AuditAction.DELETE,
-                null, actor, source, "DELETE", "/" + resourceType + "/" + resourceId, 204, durationMs);
-        return logAsync(log);
+        return logDelete(resourceType, resourceId, actor, source, durationMs, null);
     }
 
     /**
@@ -374,5 +430,91 @@ public class AuditLogService {
         }
 
         return counts;
+    }
+
+    /**
+     * Compute field-level changes between old and new JSON values.
+     *
+     * @param oldJson The old JSON representation
+     * @param newJson The new JSON representation
+     * @return Map of field names to their changes
+     */
+    public Map<String, FieldChange> computeChanges(String oldJson, String newJson) {
+        Map<String, FieldChange> changes = new HashMap<>();
+
+        try {
+            JsonObject oldObj = gson.fromJson(oldJson, JsonObject.class);
+            JsonObject newObj = gson.fromJson(newJson, JsonObject.class);
+
+            // Get all keys from both objects
+            Set<String> allKeys = new HashSet<>();
+            if (oldObj != null) {
+                allKeys.addAll(oldObj.keySet());
+            }
+            if (newObj != null) {
+                allKeys.addAll(newObj.keySet());
+            }
+
+            for (String key : allKeys) {
+                // Skip meta and id fields as they always change
+                if (IGNORED_FIELDS.contains(key)) {
+                    continue;
+                }
+
+                JsonElement oldElement = oldObj != null ? oldObj.get(key) : null;
+                JsonElement newElement = newObj != null ? newObj.get(key) : null;
+
+                if (oldElement == null && newElement != null) {
+                    // Field was added
+                    changes.put(key, FieldChange.builder()
+                            .field(key)
+                            .oldValue(null)
+                            .newValue(toSimpleValue(newElement))
+                            .changeType(ChangeType.ADDED)
+                            .build());
+                } else if (oldElement != null && newElement == null) {
+                    // Field was removed
+                    changes.put(key, FieldChange.builder()
+                            .field(key)
+                            .oldValue(toSimpleValue(oldElement))
+                            .newValue(null)
+                            .changeType(ChangeType.REMOVED)
+                            .build());
+                } else if (oldElement != null && !oldElement.equals(newElement)) {
+                    // Field was modified
+                    changes.put(key, FieldChange.builder()
+                            .field(key)
+                            .oldValue(toSimpleValue(oldElement))
+                            .newValue(toSimpleValue(newElement))
+                            .changeType(ChangeType.MODIFIED)
+                            .build());
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error computing changes: {}", e.getMessage());
+        }
+
+        return changes;
+    }
+
+    /**
+     * Convert a JsonElement to a simple value for storage.
+     * For complex objects, returns the JSON string representation.
+     */
+    private Object toSimpleValue(JsonElement element) {
+        if (element == null || element.isJsonNull()) {
+            return null;
+        }
+        if (element.isJsonPrimitive()) {
+            if (element.getAsJsonPrimitive().isBoolean()) {
+                return element.getAsBoolean();
+            } else if (element.getAsJsonPrimitive().isNumber()) {
+                return element.getAsNumber();
+            } else {
+                return element.getAsString();
+            }
+        }
+        // For arrays and objects, return the JSON string
+        return element.toString();
     }
 }

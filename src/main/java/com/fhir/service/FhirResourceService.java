@@ -121,9 +121,9 @@ public class FhirResourceService {
             // Save history asynchronously
             saveHistoryAsync(resourceType, resourceId, 1L, resourceJson, "CREATE");
 
-            // Log audit event asynchronously
+            // Log audit event asynchronously with new value
             auditLogService.logCreate(resourceType, resourceId, 1L, null, null,
-                    System.currentTimeMillis() - startTime);
+                    System.currentTimeMillis() - startTime, resourceJson);
 
             metrics.recordCreate(resourceType);
             logger.info("Created {} with id: {}", resourceType, resourceId);
@@ -184,6 +184,7 @@ public class FhirResourceService {
 
             Long newVersion;
             Instant now = Instant.now();
+            String oldResourceJson = null;
 
             if (existingDoc == null) {
                 newVersion = 1L;
@@ -195,6 +196,12 @@ public class FhirResourceService {
                     throw new FhirValidationException("Cannot update a deleted resource");
                 }
                 newVersion = existingDoc.getVersionId() + 1;
+                // Capture old value for audit logging
+                if (existingDoc.getIsCompressed() != null && existingDoc.getIsCompressed() && existingDoc.getCompressedJson() != null) {
+                    oldResourceJson = CompressionUtil.decompress(existingDoc.getCompressedJson());
+                } else {
+                    oldResourceJson = existingDoc.getResourceJson();
+                }
             }
 
             if (resource instanceof Resource) {
@@ -236,9 +243,9 @@ public class FhirResourceService {
             // Save history asynchronously
             saveHistoryAsync(resourceType, resourceId, newVersion, resourceJson, "UPDATE");
 
-            // Log audit event asynchronously
+            // Log audit event asynchronously with old and new values
             auditLogService.logUpdate(resourceType, resourceId, newVersion, null, null,
-                    System.currentTimeMillis() - startTime);
+                    System.currentTimeMillis() - startTime, oldResourceJson, resourceJson);
 
             metrics.recordUpdate(resourceType);
             logger.info("Updated {} with id: {} to version: {}", resourceType, resourceId, newVersion);
@@ -262,6 +269,14 @@ public class FhirResourceService {
                 .findByResourceTypeAndResourceIdAndDeletedFalse(resourceType, resourceId)
                 .orElseThrow(() -> new FhirResourceNotFoundException(resourceType, resourceId));
 
+        // Capture old value for audit logging before deletion
+        String oldResourceJson;
+        if (doc.getIsCompressed() != null && doc.getIsCompressed() && doc.getCompressedJson() != null) {
+            oldResourceJson = CompressionUtil.decompress(doc.getCompressedJson());
+        } else {
+            oldResourceJson = doc.getResourceJson();
+        }
+
         doc.setDeleted(true);
         doc.setActive(false);
         doc.setLastUpdated(Instant.now());
@@ -272,9 +287,9 @@ public class FhirResourceService {
         // Save history asynchronously
         saveHistoryAsync(resourceType, resourceId, doc.getVersionId(), doc.getResourceJson(), "DELETE");
 
-        // Log audit event asynchronously
+        // Log audit event asynchronously with old value
         auditLogService.logDelete(resourceType, resourceId, null, null,
-                System.currentTimeMillis() - startTime);
+                System.currentTimeMillis() - startTime, oldResourceJson);
 
         metrics.recordDelete(resourceType);
         logger.info("Deleted {} with id: {}", resourceType, resourceId);

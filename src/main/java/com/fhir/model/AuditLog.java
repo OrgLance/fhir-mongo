@@ -124,6 +124,27 @@ public class AuditLog {
     private Map<String, Object> context;
 
     /**
+     * Previous state of the resource (before the operation).
+     * Stored for UPDATE and DELETE operations.
+     */
+    @Field("oldValue")
+    private String oldValue;
+
+    /**
+     * New state of the resource (after the operation).
+     * Stored for CREATE and UPDATE operations.
+     */
+    @Field("newValue")
+    private String newValue;
+
+    /**
+     * Summary of changes between old and new values.
+     * Contains field-level diff for UPDATE operations.
+     */
+    @Field("changes")
+    private Map<String, FieldChange> changes;
+
+    /**
      * Audit actions enum.
      */
     public enum AuditAction {
@@ -156,5 +177,33 @@ public class AuditLog {
 
         @Field("source")
         private String source;
+    }
+
+    /**
+     * Represents a single field change in an update operation.
+     */
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class FieldChange {
+
+        @Field("field")
+        private String field;
+
+        @Field("oldValue")
+        private Object oldValue;
+
+        @Field("newValue")
+        private Object newValue;
+
+        @Field("changeType")
+        private ChangeType changeType;
+
+        public enum ChangeType {
+            ADDED,
+            REMOVED,
+            MODIFIED
+        }
     }
 }
