@@ -413,6 +413,87 @@ The server creates optimized compound indexes for:
 
 ---
 
+## Audit Logging
+
+All FHIR resource operations are logged to MongoDB **Time Series Collections** for efficient time-based queries and automatic data expiration.
+
+### Features
+
+- **Per-resource collections**: Each resource type has its own time series collection (e.g., `audit_patient`, `audit_observation`)
+- **Auto-creation**: Collections are created automatically on first use
+- **Change tracking**: Stores old/new values and field-level diffs for UPDATE operations
+- **Auto-expiration**: Data automatically expires after retention period (default: 90 days)
+- **Async logging**: Non-blocking audit writes for optimal API performance
+
+### Configuration
+
+```yaml
+fhir:
+  audit:
+    enabled: true              # Enable/disable audit logging
+    retention-days: 90         # Auto-expire data after N days
+    granularity: SECONDS       # Time series granularity (SECONDS, MINUTES, HOURS)
+```
+
+### Audit Log Structure
+
+| Field | Description |
+|-------|-------------|
+| `timestamp` | Event timestamp (time series time field) |
+| `action` | CREATE, READ, UPDATE, DELETE, SEARCH, etc. |
+| `resourceType` | FHIR resource type |
+| `resourceId` | Resource ID |
+| `versionId` | Resource version after operation |
+| `oldValue` | Previous state (UPDATE/DELETE) |
+| `newValue` | New state (CREATE/UPDATE) |
+| `changes` | Field-level diff (UPDATE only) |
+| `actor` | User/system performing action |
+| `durationMs` | Operation duration in milliseconds |
+
+### Audit API Endpoints
+
+```bash
+# Get audit system status
+curl http://localhost:8080/fhir/_audit/status
+
+# Get collection info for a resource type
+curl http://localhost:8080/fhir/_audit/collections/Patient
+
+# Get audit logs for a specific resource
+curl http://localhost:8080/fhir/_audit/Patient/p-123
+
+# Get recent audit logs (last 24 hours)
+curl http://localhost:8080/fhir/_audit/Patient/p-123/recent?hours=24
+
+# Get audit statistics by action type
+curl http://localhost:8080/fhir/_audit/Patient/stats
+```
+
+### Example Audit Log (UPDATE)
+
+```json
+{
+  "timestamp": "2026-02-06T08:30:00Z",
+  "action": "UPDATE",
+  "resourceType": "Patient",
+  "resourceId": "p-123",
+  "versionId": 2,
+  "oldValue": "{\"resourceType\":\"Patient\",\"gender\":\"male\"...}",
+  "newValue": "{\"resourceType\":\"Patient\",\"gender\":\"female\"...}",
+  "changes": {
+    "gender": {
+      "field": "gender",
+      "oldValue": "male",
+      "newValue": "female",
+      "changeType": "MODIFIED"
+    }
+  },
+  "durationMs": 45
+}
+```
+
+---
+
 ## Monitoring
 
 ### Health Endpoints

@@ -71,7 +71,15 @@ public class AuditLogService {
     @PostConstruct
     public void init() {
         if (auditEnabled) {
-            logger.info("Audit logging enabled with {} days retention", retentionDays);
+            logger.info("=== FHIR Audit Logging Configuration ===");
+            logger.info("Audit logging: ENABLED");
+            logger.info("Storage: MongoDB Time Series Collections");
+            logger.info("Collection prefix: {}", AUDIT_COLLECTION_PREFIX);
+            logger.info("Time field: {}", TIME_FIELD);
+            logger.info("Meta field: {}", META_FIELD);
+            logger.info("Retention: {} days (auto-expiration)", retentionDays);
+            logger.info("Granularity: {}", granularity);
+            logger.info("=========================================");
         } else {
             logger.info("Audit logging is disabled");
         }
@@ -430,6 +438,91 @@ public class AuditLogService {
         }
 
         return counts;
+    }
+
+    /**
+     * Check if a collection is a time series collection.
+     */
+    public boolean isTimeSeriesCollection(String resourceType) {
+        String collectionName = getAuditCollectionName(resourceType);
+        try {
+            MongoDatabase database = mongoTemplate.getDb();
+            for (Document doc : database.listCollections()) {
+                if (collectionName.equals(doc.getString("name"))) {
+                    Document options = doc.get("options", Document.class);
+                    if (options != null && options.get("timeseries") != null) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error checking time series collection: {}", e.getMessage());
+        }
+        return false;
+    }
+
+    /**
+     * Get all audit time series collections.
+     */
+    public java.util.List<String> getAuditCollections() {
+        java.util.List<String> auditCollections = new java.util.ArrayList<>();
+        try {
+            MongoDatabase database = mongoTemplate.getDb();
+            for (Document doc : database.listCollections()) {
+                String name = doc.getString("name");
+                if (name != null && name.startsWith(AUDIT_COLLECTION_PREFIX)) {
+                    auditCollections.add(name);
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error listing audit collections: {}", e.getMessage());
+        }
+        return auditCollections;
+    }
+
+    /**
+     * Get time series collection info for a resource type.
+     */
+    public Map<String, Object> getCollectionInfo(String resourceType) {
+        String collectionName = getAuditCollectionName(resourceType);
+        Map<String, Object> info = new HashMap<>();
+        info.put("collectionName", collectionName);
+        info.put("resourceType", resourceType);
+
+        try {
+            MongoDatabase database = mongoTemplate.getDb();
+            for (Document doc : database.listCollections()) {
+                if (collectionName.equals(doc.getString("name"))) {
+                    Document options = doc.get("options", Document.class);
+                    if (options != null) {
+                        Document timeseries = options.get("timeseries", Document.class);
+                        if (timeseries != null) {
+                            info.put("isTimeSeries", true);
+                            info.put("timeField", timeseries.getString("timeField"));
+                            info.put("metaField", timeseries.getString("metaField"));
+                            info.put("granularity", timeseries.getString("granularity"));
+                        }
+                        Long expireAfterSeconds = options.getLong("expireAfterSeconds");
+                        if (expireAfterSeconds != null) {
+                            info.put("expireAfterSeconds", expireAfterSeconds);
+                            info.put("retentionDays", expireAfterSeconds / (24 * 60 * 60));
+                        }
+                    }
+                    break;
+                }
+            }
+            if (!info.containsKey("isTimeSeries")) {
+                info.put("isTimeSeries", false);
+                info.put("exists", false);
+            } else {
+                info.put("exists", true);
+            }
+        } catch (Exception e) {
+            logger.error("Error getting collection info: {}", e.getMessage());
+            info.put("error", e.getMessage());
+        }
+
+        return info;
     }
 
     /**
