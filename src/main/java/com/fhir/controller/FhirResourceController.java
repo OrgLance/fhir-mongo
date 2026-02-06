@@ -1,6 +1,7 @@
 package com.fhir.controller;
 
 import ca.uhn.fhir.context.FhirContext;
+import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.service.FhirResourceService;
 import com.fhir.service.FhirSearchService;
@@ -17,9 +18,7 @@ import org.hl7.fhir.r4.model.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -35,6 +34,9 @@ import java.util.Map;
 public class FhirResourceController {
 
     private static final Logger logger = LoggerFactory.getLogger(FhirResourceController.class);
+
+    @Value("${fhir.server.base-url:http://localhost:8080/fhir}")
+    private String baseUrl;
 
     @Autowired
     private FhirResourceService resourceService;
@@ -166,36 +168,28 @@ public class FhirResourceController {
     }
 
     @GetMapping(value = "/{resourceType}", produces = MediaType.APPLICATION_JSON_VALUE)
-    @Operation(summary = "Search FHIR resources", description = "Search for resources of a specific type with optional parameters")
+    @Operation(summary = "Search FHIR resources", description = "Search for resources of a specific type with cursor-based pagination for O(1) performance")
     @ApiResponses(value = {
-            @ApiResponse(responseCode = "200", description = "Search results returned as Bundle")
+            @ApiResponse(responseCode = "200", description = "Search results returned as Bundle with cursor links")
     })
     public ResponseEntity<String> search(
             @PathVariable String resourceType,
-            @Parameter(description = "Page number (0-based)")
-            @RequestParam(value = "_page", defaultValue = "0") int page,
-            @Parameter(description = "Number of results per page")
+            @Parameter(description = "Cursor for pagination (ID from previous page's next link)")
+            @RequestParam(value = "_cursor", required = false) String cursor,
+            @Parameter(description = "Number of results per page (default: 20, max: 100)")
             @RequestParam(value = "_count", defaultValue = "20") int count,
             HttpServletRequest request) {
 
-        logger.debug("Searching {} resources", resourceType);
+        logger.debug("Searching {} resources with cursor: {}", resourceType, cursor);
 
         Map<String, String> searchParams = extractSearchParams(request);
 
-        if (searchParams.isEmpty() || (searchParams.size() == 2 && searchParams.containsKey("_page") && searchParams.containsKey("_count"))) {
-            Bundle bundle = resourceService.search(resourceType, searchParams, page, count);
-            return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(fhirContext.newJsonParser().encodeResourceToString(bundle));
-        }
+        // Remove pagination params from search params
+        searchParams.remove("_cursor");
+        searchParams.remove("_count");
 
-        Page<FhirResourceDocument> results = searchService.search(
-                resourceType,
-                searchParams,
-                PageRequest.of(page, count, Sort.by(Sort.Direction.DESC, "lastUpdated"))
-        );
-
-        Bundle bundle = createSearchBundle(results, resourceType);
+        // Use cursor-based pagination
+        Bundle bundle = searchWithCursorPagination(resourceType, searchParams, cursor, count);
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
@@ -251,24 +245,76 @@ public class FhirResourceController {
         return params;
     }
 
-    private Bundle createSearchBundle(Page<FhirResourceDocument> results, String resourceType) {
+    /**
+     * Perform search with cursor-based pagination.
+     * Uses MongoDB _id for O(1) pagination performance regardless of result set size.
+     */
+    private Bundle searchWithCursorPagination(String resourceType, Map<String, String> searchParams,
+                                               String cursor, int count) {
+        // Limit count to reasonable maximum
+        int effectiveCount = Math.min(Math.max(count, 1), 100);
+
+        CursorPage<FhirResourceDocument> cursorPage;
+
+        if (searchParams.isEmpty()) {
+            // No search params - use direct cursor pagination
+            cursorPage = resourceService.searchWithCursor(resourceType, cursor, effectiveCount);
+        } else {
+            // With search params - use search service with cursor
+            cursorPage = searchService.searchWithCursor(resourceType, searchParams, cursor, effectiveCount);
+        }
+
+        return createCursorBundle(cursorPage, resourceType, cursor, effectiveCount);
+    }
+
+    /**
+     * Create a FHIR Bundle with cursor-based pagination links.
+     */
+    private Bundle createCursorBundle(CursorPage<FhirResourceDocument> cursorPage, String resourceType,
+                                       String currentCursor, int count) {
         Bundle bundle = new Bundle();
         bundle.setType(Bundle.BundleType.SEARCHSET);
-        bundle.setTotal((int) results.getTotalElements());
 
-        for (FhirResourceDocument doc : results.getContent()) {
+        // Add entries
+        for (FhirResourceDocument doc : cursorPage.getContent()) {
             Bundle.BundleEntryComponent entry = bundle.addEntry();
 
-            // Handle compressed resources
             String json = getResourceJson(doc);
             IBaseResource resource = fhirContext.newJsonParser().parseResource(json);
             entry.setResource((Resource) resource);
-            entry.setFullUrl("/fhir/" + resourceType + "/" + doc.getResourceId());
+            entry.setFullUrl(baseUrl + "/" + resourceType + "/" + doc.getResourceId());
 
             Bundle.BundleEntrySearchComponent search = new Bundle.BundleEntrySearchComponent();
             search.setMode(Bundle.SearchEntryMode.MATCH);
             entry.setSearch(search);
         }
+
+        // Set total if available
+        if (cursorPage.getEstimatedTotal() != null) {
+            bundle.setTotal(cursorPage.getEstimatedTotal().intValue());
+        }
+
+        // Add self link
+        String selfUrl = baseUrl + "/" + resourceType + "?_count=" + count;
+        if (currentCursor != null && !currentCursor.isEmpty()) {
+            selfUrl += "&_cursor=" + currentCursor;
+        }
+        bundle.addLink().setRelation("self").setUrl(selfUrl);
+
+        // Add next link if more results available
+        if (cursorPage.isHasNext() && cursorPage.getNextCursor() != null) {
+            String nextUrl = baseUrl + "/" + resourceType + "?_count=" + count + "&_cursor=" + cursorPage.getNextCursor();
+            bundle.addLink().setRelation("next").setUrl(nextUrl);
+        }
+
+        // Add previous link if available
+        if (cursorPage.isHasPrevious() && cursorPage.getPreviousCursor() != null) {
+            String prevUrl = baseUrl + "/" + resourceType + "?_count=" + count + "&_cursor=" + cursorPage.getPreviousCursor();
+            bundle.addLink().setRelation("previous").setUrl(prevUrl);
+        }
+
+        // Add first link (no cursor = first page)
+        bundle.addLink().setRelation("first").setUrl(baseUrl + "/" + resourceType + "?_count=" + count);
 
         return bundle;
     }

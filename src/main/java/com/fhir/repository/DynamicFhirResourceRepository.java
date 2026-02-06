@@ -395,6 +395,86 @@ public class DynamicFhirResourceRepository {
         return new SliceImpl<>(new ArrayList<>(), pageable, false);
     }
 
+    /**
+     * System-level cursor-based pagination - get first page.
+     */
+    public Slice<FhirResourceDocument> findSliceByDeletedFalse(Pageable pageable) {
+        Set<String> collectionNames = mongoTemplate.getCollectionNames();
+        List<FhirResourceDocument> allDocs = new ArrayList<>();
+
+        for (String collectionName : collectionNames) {
+            if (collectionName.startsWith("system.") || collectionName.equals("fhir_resource_history")) {
+                continue;
+            }
+
+            Query query = new Query(Criteria.where("deleted").is(false))
+                    .with(Sort.by(Sort.Direction.ASC, "_id"))
+                    .limit(pageable.getPageSize() + 1 - allDocs.size());
+
+            List<FhirResourceDocument> docs = mongoTemplate.find(query, FhirResourceDocument.class, collectionName);
+            allDocs.addAll(docs);
+
+            if (allDocs.size() >= pageable.getPageSize() + 1) {
+                break;
+            }
+        }
+
+        // Sort by _id across all collections
+        allDocs.sort((a, b) -> {
+            ObjectId idA = new ObjectId(a.getId());
+            ObjectId idB = new ObjectId(b.getId());
+            return idA.compareTo(idB);
+        });
+
+        boolean hasNext = allDocs.size() > pageable.getPageSize();
+        if (hasNext && allDocs.size() > pageable.getPageSize()) {
+            allDocs = allDocs.subList(0, pageable.getPageSize());
+        }
+
+        return new SliceImpl<>(allDocs, pageable, hasNext);
+    }
+
+    /**
+     * System-level cursor-based pagination - subsequent pages.
+     */
+    public Slice<FhirResourceDocument> findByDeletedFalseAfterCursor(ObjectId cursor, Pageable pageable) {
+        Set<String> collectionNames = mongoTemplate.getCollectionNames();
+        List<FhirResourceDocument> allDocs = new ArrayList<>();
+
+        for (String collectionName : collectionNames) {
+            if (collectionName.startsWith("system.") || collectionName.equals("fhir_resource_history")) {
+                continue;
+            }
+
+            Query query = new Query(Criteria.where("deleted").is(false)
+                    .and("_id").gt(cursor))
+                    .with(Sort.by(Sort.Direction.ASC, "_id"))
+                    .limit(pageable.getPageSize() + 1);
+
+            List<FhirResourceDocument> docs = mongoTemplate.find(query, FhirResourceDocument.class, collectionName);
+            allDocs.addAll(docs);
+        }
+
+        // Sort by _id across all collections
+        allDocs.sort((a, b) -> {
+            ObjectId idA = new ObjectId(a.getId());
+            ObjectId idB = new ObjectId(b.getId());
+            return idA.compareTo(idB);
+        });
+
+        // Take only pageSize + 1 to determine if there's more
+        if (allDocs.size() > pageable.getPageSize() + 1) {
+            allDocs = allDocs.subList(0, pageable.getPageSize() + 1);
+        }
+
+        boolean hasNext = allDocs.size() > pageable.getPageSize();
+        if (hasNext && allDocs.size() > pageable.getPageSize()) {
+            allDocs = allDocs.subList(0, pageable.getPageSize());
+        }
+
+        return new SliceImpl<>(allDocs, pageable, hasNext);
+    }
+
     public long countAllByDeletedFalse() {
         Set<String> collectionNames = mongoTemplate.getCollectionNames();
         long totalCount = 0;

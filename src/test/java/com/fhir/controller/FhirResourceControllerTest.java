@@ -2,6 +2,7 @@ package com.fhir.controller;
 
 import ca.uhn.fhir.context.FhirContext;
 import com.fhir.config.TestConfig;
+import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.service.FhirResourceService;
 import com.fhir.service.FhirSearchService;
@@ -15,9 +16,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
-import org.springframework.data.domain.Pageable;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -237,28 +235,27 @@ class FhirResourceControllerTest {
         @Test
         @DisplayName("Should search resources without parameters")
         void shouldSearchResourcesWithoutParameters() throws Exception {
-            Bundle searchBundle = new Bundle();
-            searchBundle.setType(Bundle.BundleType.SEARCHSET);
-            searchBundle.setTotal(1);
-            searchBundle.addEntry().setResource(samplePatient);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    List.of(sampleDocument), false, null);
 
-            when(resourceService.search(eq("Patient"), anyMap(), eq(0), eq(20)))
-                    .thenReturn(searchBundle);
+            when(resourceService.searchWithCursor(eq("Patient"), isNull(), eq(20)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/fhir/Patient")
                             .accept(MediaType.APPLICATION_JSON))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.resourceType").value("Bundle"))
-                    .andExpect(jsonPath("$.type").value("searchset"))
-                    .andExpect(jsonPath("$.total").value(1));
+                    .andExpect(jsonPath("$.type").value("searchset"));
         }
 
         @Test
         @DisplayName("Should search resources with parameters")
         void shouldSearchResourcesWithParameters() throws Exception {
-            Page<FhirResourceDocument> page = new PageImpl<>(List.of(sampleDocument));
-            when(searchService.search(eq("Patient"), anyMap(), any(Pageable.class)))
-                    .thenReturn(page);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    List.of(sampleDocument), false, null);
+
+            when(searchService.searchWithCursor(eq("Patient"), anyMap(), isNull(), eq(20)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/fhir/Patient")
                             .param("name", "Smith")
@@ -267,26 +264,25 @@ class FhirResourceControllerTest {
                     .andExpect(jsonPath("$.resourceType").value("Bundle"))
                     .andExpect(jsonPath("$.type").value("searchset"));
 
-            verify(searchService).search(eq("Patient"), anyMap(), any(Pageable.class));
+            verify(searchService).searchWithCursor(eq("Patient"), anyMap(), isNull(), eq(20));
         }
 
         @Test
         @DisplayName("Should search with pagination parameters")
         void shouldSearchWithPaginationParameters() throws Exception {
-            Bundle searchBundle = new Bundle();
-            searchBundle.setType(Bundle.BundleType.SEARCHSET);
-            searchBundle.setTotal(0);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    Collections.emptyList(), false, null);
 
-            when(resourceService.search(eq("Patient"), anyMap(), eq(1), eq(10)))
-                    .thenReturn(searchBundle);
+            when(resourceService.searchWithCursor(eq("Patient"), eq("cursor123"), eq(10)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/fhir/Patient")
-                            .param("_page", "1")
+                            .param("_cursor", "cursor123")
                             .param("_count", "10")
                             .accept(MediaType.APPLICATION_JSON))
                     .andExpect(status().isOk());
 
-            verify(resourceService).search(eq("Patient"), anyMap(), eq(1), eq(10));
+            verify(resourceService).searchWithCursor(eq("Patient"), eq("cursor123"), eq(10));
         }
     }
 

@@ -117,7 +117,7 @@ class FhirSystemControllerTest {
         @Test
         @DisplayName("Should perform system-level search")
         void shouldPerformSystemLevelSearch() throws Exception {
-            when(resourceService.searchAll(anyMap(), eq(0), eq(20))).thenReturn(searchBundle);
+            when(resourceService.searchAllWithCursor(anyMap(), isNull(), eq(20))).thenReturn(searchBundle);
 
             mockMvc.perform(get("/fhir")
                             .accept(MediaType.APPLICATION_JSON))
@@ -125,21 +125,21 @@ class FhirSystemControllerTest {
                     .andExpect(jsonPath("$.resourceType").value("Bundle"))
                     .andExpect(jsonPath("$.type").value("searchset"));
 
-            verify(resourceService).searchAll(anyMap(), eq(0), eq(20));
+            verify(resourceService).searchAllWithCursor(anyMap(), isNull(), eq(20));
         }
 
         @Test
         @DisplayName("Should perform system search with pagination")
         void shouldPerformSystemSearchWithPagination() throws Exception {
-            when(resourceService.searchAll(anyMap(), eq(1), eq(10))).thenReturn(searchBundle);
+            when(resourceService.searchAllWithCursor(anyMap(), eq("cursor123"), eq(10))).thenReturn(searchBundle);
 
             mockMvc.perform(get("/fhir")
-                            .param("_page", "1")
+                            .param("_cursor", "cursor123")
                             .param("_count", "10")
                             .accept(MediaType.APPLICATION_JSON))
                     .andExpect(status().isOk());
 
-            verify(resourceService).searchAll(anyMap(), eq(1), eq(10));
+            verify(resourceService).searchAllWithCursor(anyMap(), eq("cursor123"), eq(10));
         }
     }
 
@@ -150,28 +150,28 @@ class FhirSystemControllerTest {
         @Test
         @DisplayName("Should get system-level history")
         void shouldGetSystemLevelHistory() throws Exception {
-            when(resourceService.searchAll(anyMap(), eq(0), eq(20))).thenReturn(searchBundle);
+            when(resourceService.searchAllWithCursor(anyMap(), isNull(), eq(20))).thenReturn(searchBundle);
 
             mockMvc.perform(get("/fhir/_history")
                             .accept(MediaType.APPLICATION_JSON))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.resourceType").value("Bundle"));
 
-            verify(resourceService).searchAll(anyMap(), eq(0), eq(20));
+            verify(resourceService).searchAllWithCursor(anyMap(), isNull(), eq(20));
         }
 
         @Test
         @DisplayName("Should get system history with pagination")
         void shouldGetSystemHistoryWithPagination() throws Exception {
-            when(resourceService.searchAll(anyMap(), eq(2), eq(50))).thenReturn(searchBundle);
+            when(resourceService.searchAllWithCursor(anyMap(), eq("cursor456"), eq(50))).thenReturn(searchBundle);
 
             mockMvc.perform(get("/fhir/_history")
-                            .param("_page", "2")
+                            .param("_cursor", "cursor456")
                             .param("_count", "50")
                             .accept(MediaType.APPLICATION_JSON))
                     .andExpect(status().isOk());
 
-            verify(resourceService).searchAll(anyMap(), eq(2), eq(50));
+            verify(resourceService).searchAllWithCursor(anyMap(), eq("cursor456"), eq(50));
         }
     }
 }

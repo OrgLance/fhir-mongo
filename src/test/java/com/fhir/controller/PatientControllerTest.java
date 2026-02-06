@@ -2,6 +2,7 @@ package com.fhir.controller;
 
 import ca.uhn.fhir.context.FhirContext;
 import com.fhir.config.TestConfig;
+import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.service.FhirResourceService;
 import com.fhir.service.FhirSearchService;
@@ -15,13 +16,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
-import org.springframework.data.domain.Pageable;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -122,13 +121,11 @@ class PatientControllerTest {
         @Test
         @DisplayName("Should search all patients without parameters")
         void shouldSearchAllPatientsWithoutParameters() throws Exception {
-            Bundle bundle = new Bundle();
-            bundle.setType(Bundle.BundleType.SEARCHSET);
-            bundle.setTotal(1);
-            bundle.addEntry().setResource(samplePatient);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    List.of(sampleDocument), false, null);
 
-            when(resourceService.search(eq("Patient"), anyMap(), eq(0), eq(20)))
-                    .thenReturn(bundle);
+            when(resourceService.searchWithCursor(eq("Patient"), isNull(), eq(20)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/api/patients")
                             .accept(MediaType.APPLICATION_JSON))
@@ -136,15 +133,17 @@ class PatientControllerTest {
                     .andExpect(jsonPath("$.resourceType").value("Bundle"))
                     .andExpect(jsonPath("$.type").value("searchset"));
 
-            verify(resourceService).search(eq("Patient"), anyMap(), eq(0), eq(20));
+            verify(resourceService).searchWithCursor(eq("Patient"), isNull(), eq(20));
         }
 
         @Test
         @DisplayName("Should search patients with name parameter")
         void shouldSearchPatientsWithNameParameter() throws Exception {
-            Page<FhirResourceDocument> page = new PageImpl<>(List.of(sampleDocument));
-            when(searchService.search(eq("Patient"), anyMap(), any(Pageable.class)))
-                    .thenReturn(page);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    List.of(sampleDocument), false, null);
+
+            when(searchService.searchWithCursor(eq("Patient"), anyMap(), isNull(), eq(20)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/api/patients")
                             .param("name", "Smith")
@@ -152,15 +151,17 @@ class PatientControllerTest {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.resourceType").value("Bundle"));
 
-            verify(searchService).search(eq("Patient"), anyMap(), any(Pageable.class));
+            verify(searchService).searchWithCursor(eq("Patient"), anyMap(), isNull(), eq(20));
         }
 
         @Test
         @DisplayName("Should search patients with gender parameter")
         void shouldSearchPatientsWithGenderParameter() throws Exception {
-            Page<FhirResourceDocument> page = new PageImpl<>(List.of(sampleDocument));
-            when(searchService.search(eq("Patient"), anyMap(), any(Pageable.class)))
-                    .thenReturn(page);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    List.of(sampleDocument), false, null);
+
+            when(searchService.searchWithCursor(eq("Patient"), anyMap(), isNull(), eq(20)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/api/patients")
                             .param("gender", "male")
@@ -172,9 +173,11 @@ class PatientControllerTest {
         @Test
         @DisplayName("Should search patients with birthdate parameter")
         void shouldSearchPatientsWithBirthdateParameter() throws Exception {
-            Page<FhirResourceDocument> page = new PageImpl<>(List.of(sampleDocument));
-            when(searchService.search(eq("Patient"), anyMap(), any(Pageable.class)))
-                    .thenReturn(page);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    List.of(sampleDocument), false, null);
+
+            when(searchService.searchWithCursor(eq("Patient"), anyMap(), isNull(), eq(20)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/api/patients")
                             .param("birthdate", "1990-01-01")
@@ -186,20 +189,19 @@ class PatientControllerTest {
         @Test
         @DisplayName("Should search with pagination")
         void shouldSearchWithPagination() throws Exception {
-            Bundle bundle = new Bundle();
-            bundle.setType(Bundle.BundleType.SEARCHSET);
-            bundle.setTotal(0);
+            CursorPage<FhirResourceDocument> cursorPage = CursorPage.of(
+                    Collections.emptyList(), false, null);
 
-            when(resourceService.search(eq("Patient"), anyMap(), eq(1), eq(10)))
-                    .thenReturn(bundle);
+            when(resourceService.searchWithCursor(eq("Patient"), eq("cursor123"), eq(10)))
+                    .thenReturn(cursorPage);
 
             mockMvc.perform(get("/api/patients")
-                            .param("_page", "1")
+                            .param("_cursor", "cursor123")
                             .param("_count", "10")
                             .accept(MediaType.APPLICATION_JSON))
                     .andExpect(status().isOk());
 
-            verify(resourceService).search(eq("Patient"), anyMap(), eq(1), eq(10));
+            verify(resourceService).searchWithCursor(eq("Patient"), eq("cursor123"), eq(10));
         }
     }
 

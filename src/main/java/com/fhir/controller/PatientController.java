@@ -1,6 +1,7 @@
 package com.fhir.controller;
 
 import ca.uhn.fhir.context.FhirContext;
+import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.service.FhirResourceService;
 import com.fhir.service.FhirSearchService;
@@ -17,9 +18,7 @@ import org.hl7.fhir.r4.model.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -35,6 +34,9 @@ public class PatientController {
 
     private static final Logger logger = LoggerFactory.getLogger(PatientController.class);
     private static final String RESOURCE_TYPE = "Patient";
+
+    @Value("${fhir.server.base-url:http://localhost:8080}")
+    private String baseUrl;
 
     @Autowired
     private FhirResourceService resourceService;
@@ -85,9 +87,11 @@ public class PatientController {
     }
 
     @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
-    @Operation(summary = "Search Patients", description = "Search all Patients")
+    @Operation(summary = "Search Patients", description = "Search Patients with cursor-based pagination for O(1) performance")
     public ResponseEntity<String> getAllPatients(
-            @RequestParam(value = "_page", defaultValue = "0") int page,
+            @Parameter(description = "Cursor for pagination (ID from previous page's next link)")
+            @RequestParam(value = "_cursor", required = false) String cursor,
+            @Parameter(description = "Number of results per page (default: 20, max: 100)")
             @RequestParam(value = "_count", defaultValue = "20") int count,
             @Parameter(description = "Patient name") @RequestParam(required = false) String name,
             @Parameter(description = "Family name") @RequestParam(required = false) String family,
@@ -100,7 +104,10 @@ public class PatientController {
             @Parameter(description = "Address city") @RequestParam(value = "address-city", required = false) String addressCity,
             @Parameter(description = "Address state") @RequestParam(value = "address-state", required = false) String addressState) {
 
-        logger.debug("Searching all Patients");
+        logger.debug("Searching Patients with cursor: {}", cursor);
+
+        // Limit count to reasonable maximum
+        int effectiveCount = Math.min(Math.max(count, 1), 100);
 
         Map<String, String> searchParams = new HashMap<>();
         if (name != null) searchParams.put("name", name);
@@ -114,42 +121,58 @@ public class PatientController {
         if (addressCity != null) searchParams.put("address-city", addressCity);
         if (addressState != null) searchParams.put("address-state", addressState);
 
+        CursorPage<FhirResourceDocument> cursorPage;
+
         if (searchParams.isEmpty()) {
-            Bundle bundle = resourceService.search(RESOURCE_TYPE, searchParams, page, count);
-            return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(fhirContext.newJsonParser().encodeResourceToString(bundle));
+            cursorPage = resourceService.searchWithCursor(RESOURCE_TYPE, cursor, effectiveCount);
+        } else {
+            cursorPage = searchService.searchWithCursor(RESOURCE_TYPE, searchParams, cursor, effectiveCount);
         }
 
-        Page<FhirResourceDocument> results = searchService.search(
-                RESOURCE_TYPE,
-                searchParams,
-                PageRequest.of(page, count, Sort.by(Sort.Direction.DESC, "lastUpdated"))
-        );
-
-        Bundle bundle = createSearchBundle(results);
+        Bundle bundle = createCursorBundle(cursorPage, cursor, effectiveCount);
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(fhirContext.newJsonParser().encodeResourceToString(bundle));
     }
 
-    private Bundle createSearchBundle(Page<FhirResourceDocument> results) {
+    private Bundle createCursorBundle(CursorPage<FhirResourceDocument> cursorPage, String currentCursor, int count) {
         Bundle bundle = new Bundle();
         bundle.setType(Bundle.BundleType.SEARCHSET);
-        bundle.setTotal((int) results.getTotalElements());
 
-        for (FhirResourceDocument doc : results.getContent()) {
+        // Add entries
+        for (FhirResourceDocument doc : cursorPage.getContent()) {
             Bundle.BundleEntryComponent entry = bundle.addEntry();
             String json = getResourceJson(doc);
             IBaseResource resource = fhirContext.newJsonParser().parseResource(json);
             entry.setResource((Resource) resource);
-            entry.setFullUrl("/api/patients/" + doc.getResourceId());
+            entry.setFullUrl(baseUrl + "/api/patients/" + doc.getResourceId());
 
             Bundle.BundleEntrySearchComponent search = new Bundle.BundleEntrySearchComponent();
             search.setMode(Bundle.SearchEntryMode.MATCH);
             entry.setSearch(search);
         }
+
+        // Set total if available
+        if (cursorPage.getEstimatedTotal() != null) {
+            bundle.setTotal(cursorPage.getEstimatedTotal().intValue());
+        }
+
+        // Add self link
+        String selfUrl = baseUrl + "/api/patients?_count=" + count;
+        if (currentCursor != null && !currentCursor.isEmpty()) {
+            selfUrl += "&_cursor=" + currentCursor;
+        }
+        bundle.addLink().setRelation("self").setUrl(selfUrl);
+
+        // Add next link if more results available
+        if (cursorPage.isHasNext() && cursorPage.getNextCursor() != null) {
+            String nextUrl = baseUrl + "/api/patients?_count=" + count + "&_cursor=" + cursorPage.getNextCursor();
+            bundle.addLink().setRelation("next").setUrl(nextUrl);
+        }
+
+        // Add first link (no cursor = first page)
+        bundle.addLink().setRelation("first").setUrl(baseUrl + "/api/patients?_count=" + count);
 
         return bundle;
     }

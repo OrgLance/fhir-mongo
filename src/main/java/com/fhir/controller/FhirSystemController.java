@@ -3,6 +3,7 @@ package com.fhir.controller;
 import ca.uhn.fhir.context.FhirContext;
 import com.fhir.service.FhirResourceService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -12,6 +13,7 @@ import org.hl7.fhir.r4.model.CapabilityStatement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -26,6 +28,9 @@ import java.util.Map;
 public class FhirSystemController {
 
     private static final Logger logger = LoggerFactory.getLogger(FhirSystemController.class);
+
+    @Value("${fhir.server.base-url:http://localhost:8080/fhir}")
+    private String baseUrl;
 
     @Autowired
     private FhirResourceService resourceService;
@@ -66,19 +71,30 @@ public class FhirSystemController {
     }
 
     @GetMapping(value = "", produces = MediaType.APPLICATION_JSON_VALUE)
-    @Operation(summary = "System-level search", description = "Search across all resource types")
+    @Operation(summary = "System-level search", description = "Search across all resource types with cursor-based pagination")
     @ApiResponses(value = {
-            @ApiResponse(responseCode = "200", description = "Search results returned as Bundle")
+            @ApiResponse(responseCode = "200", description = "Search results returned as Bundle with cursor links")
     })
     public ResponseEntity<String> systemSearch(
-            @RequestParam(value = "_page", defaultValue = "0") int page,
+            @Parameter(description = "Cursor for pagination (ID from previous page's next link)")
+            @RequestParam(value = "_cursor", required = false) String cursor,
+            @Parameter(description = "Number of results per page (default: 20, max: 100)")
             @RequestParam(value = "_count", defaultValue = "20") int count,
             HttpServletRequest request) {
 
-        logger.debug("Performing system-level search");
+        logger.debug("Performing system-level search with cursor: {}", cursor);
+
+        // Limit count to reasonable maximum
+        int effectiveCount = Math.min(Math.max(count, 1), 100);
 
         Map<String, String> searchParams = extractSearchParams(request);
-        Bundle bundle = resourceService.searchAll(searchParams, page, count);
+        searchParams.remove("_cursor");
+        searchParams.remove("_count");
+
+        Bundle bundle = resourceService.searchAllWithCursor(searchParams, cursor, effectiveCount);
+
+        // Add pagination links
+        addSystemSearchLinks(bundle, cursor, effectiveCount);
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
@@ -86,19 +102,50 @@ public class FhirSystemController {
     }
 
     @GetMapping(value = "/_history", produces = MediaType.APPLICATION_JSON_VALUE)
-    @Operation(summary = "System-level history", description = "Get history of all resources on the server")
+    @Operation(summary = "System-level history", description = "Get history of all resources on the server with cursor-based pagination")
     public ResponseEntity<String> systemHistory(
-            @RequestParam(value = "_page", defaultValue = "0") int page,
+            @Parameter(description = "Cursor for pagination")
+            @RequestParam(value = "_cursor", required = false) String cursor,
+            @Parameter(description = "Number of results per page")
             @RequestParam(value = "_count", defaultValue = "20") int count) {
 
-        logger.debug("Getting system-level history");
+        logger.debug("Getting system-level history with cursor: {}", cursor);
 
-        Bundle bundle = resourceService.searchAll(new HashMap<>(), page, count);
+        int effectiveCount = Math.min(Math.max(count, 1), 100);
+
+        Bundle bundle = resourceService.searchAllWithCursor(new HashMap<>(), cursor, effectiveCount);
         bundle.setType(Bundle.BundleType.HISTORY);
+
+        // Add pagination links
+        addSystemHistoryLinks(bundle, cursor, effectiveCount);
 
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(fhirContext.newJsonParser().encodeResourceToString(bundle));
+    }
+
+    private void addSystemSearchLinks(Bundle bundle, String cursor, int count) {
+        // Add self link
+        String selfUrl = baseUrl + "?_count=" + count;
+        if (cursor != null && !cursor.isEmpty()) {
+            selfUrl += "&_cursor=" + cursor;
+        }
+        bundle.addLink().setRelation("self").setUrl(selfUrl);
+
+        // Add first link
+        bundle.addLink().setRelation("first").setUrl(baseUrl + "?_count=" + count);
+    }
+
+    private void addSystemHistoryLinks(Bundle bundle, String cursor, int count) {
+        // Add self link
+        String selfUrl = baseUrl + "/_history?_count=" + count;
+        if (cursor != null && !cursor.isEmpty()) {
+            selfUrl += "&_cursor=" + cursor;
+        }
+        bundle.addLink().setRelation("self").setUrl(selfUrl);
+
+        // Add first link
+        bundle.addLink().setRelation("first").setUrl(baseUrl + "/_history?_count=" + count);
     }
 
     private Map<String, String> extractSearchParams(HttpServletRequest request) {

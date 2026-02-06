@@ -1,12 +1,16 @@
 package com.fhir.service;
 
+import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
+import org.bson.types.ObjectId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -524,5 +528,71 @@ public class FhirSearchService {
         mappings.put("Media", media);
 
         return mappings;
+    }
+
+    /**
+     * Search with cursor-based pagination for O(1) performance.
+     * Uses MongoDB _id for efficient cursor navigation.
+     *
+     * @param resourceType The FHIR resource type
+     * @param params       Search parameters
+     * @param cursor       The cursor (last _id from previous page), null for first page
+     * @param count        Number of results per page
+     * @return CursorPage with results and navigation cursors
+     */
+    public CursorPage<FhirResourceDocument> searchWithCursor(String resourceType, Map<String, String> params,
+                                                              String cursor, int count) {
+        String collectionName = getCollectionName(resourceType);
+        Query query = buildQuery(resourceType, params);
+
+        // Add cursor condition for pagination
+        if (cursor != null && !cursor.isEmpty()) {
+            try {
+                ObjectId cursorId = new ObjectId(cursor);
+                query.addCriteria(Criteria.where("_id").gt(cursorId));
+            } catch (IllegalArgumentException e) {
+                logger.warn("Invalid cursor format: {}", cursor);
+            }
+        }
+
+        // Sort by _id for consistent cursor pagination
+        query.with(Sort.by(Sort.Direction.ASC, "_id"));
+
+        // Fetch one extra to check if there's a next page
+        query.limit(count + 1);
+
+        logger.debug("Cursor search in collection '{}' with query: {}", collectionName, query);
+
+        List<FhirResourceDocument> results = mongoTemplate.find(query, FhirResourceDocument.class, collectionName);
+
+        // Determine if there's a next page
+        boolean hasNext = results.size() > count;
+        if (hasNext) {
+            results = results.subList(0, count);
+        }
+
+        // Get next cursor from last result
+        String nextCursor = null;
+        if (hasNext && !results.isEmpty()) {
+            FhirResourceDocument lastDoc = results.get(results.size() - 1);
+            nextCursor = lastDoc.getId();
+        }
+
+        // Get previous cursor from first result (for bidirectional navigation)
+        String previousCursor = null;
+        if (cursor != null && !results.isEmpty()) {
+            previousCursor = cursor;
+        }
+
+        logger.debug("Cursor search found {} results, hasNext: {}", results.size(), hasNext);
+
+        return CursorPage.<FhirResourceDocument>builder()
+                .content(results)
+                .hasNext(hasNext)
+                .hasPrevious(cursor != null && !cursor.isEmpty())
+                .nextCursor(nextCursor)
+                .previousCursor(previousCursor)
+                .size(results.size())
+                .build();
     }
 }

@@ -363,6 +363,63 @@ public class FhirResourceService {
         return createSystemSearchBundle(results, searchParams, page, pageSize);
     }
 
+    /**
+     * System-level cursor-based search across all resource types.
+     * Performance is O(1) regardless of how deep into the result set.
+     *
+     * @param searchParams Search parameters (currently not applied)
+     * @param cursor       The cursor (last ID from previous page), null for first page
+     * @param count        Number of results per page
+     * @return Bundle with results and cursor-based pagination links
+     */
+    public Bundle searchAllWithCursor(Map<String, String> searchParams, String cursor, int count) {
+        int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
+        Pageable pageable = PageRequest.of(0, pageSize + 1, Sort.by(Sort.Direction.ASC, "_id"));
+
+        Slice<FhirResourceDocument> results;
+
+        if (cursor == null || cursor.isEmpty()) {
+            results = resourceRepository.findSliceByDeletedFalse(pageable);
+        } else {
+            ObjectId cursorId = new ObjectId(cursor);
+            results = resourceRepository.findByDeletedFalseAfterCursor(cursorId, pageable);
+        }
+
+        List<FhirResourceDocument> content = results.getContent();
+        boolean hasNext = content.size() > pageSize;
+
+        if (hasNext) {
+            content = content.subList(0, pageSize);
+        }
+
+        String nextCursor = hasNext && !content.isEmpty()
+                ? content.get(content.size() - 1).getId()
+                : null;
+
+        Bundle bundle = new Bundle();
+        bundle.setType(Bundle.BundleType.SEARCHSET);
+        bundle.setTimestamp(Date.from(Instant.now()));
+
+        for (FhirResourceDocument doc : content) {
+            Bundle.BundleEntryComponent entry = bundle.addEntry();
+            entry.setFullUrl(baseUrl + "/" + doc.getResourceType() + "/" + doc.getResourceId());
+
+            IBaseResource resource = parseResourceFromDocument(doc);
+            entry.setResource((Resource) resource);
+
+            Bundle.BundleEntrySearchComponent search = new Bundle.BundleEntrySearchComponent();
+            search.setMode(Bundle.SearchEntryMode.MATCH);
+            entry.setSearch(search);
+        }
+
+        // Store cursor info for controller to add links
+        if (nextCursor != null) {
+            bundle.addLink().setRelation("next-cursor").setUrl(nextCursor);
+        }
+
+        return bundle;
+    }
+
     // ========== HISTORY ==========
 
     public Bundle history(String resourceType, String resourceId, int page, int count) {
