@@ -569,7 +569,7 @@ docker-compose exec fhir-server tail -f /app/logs/application.log
 
 ## License
 
-Apache License 2.0
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Support
 
