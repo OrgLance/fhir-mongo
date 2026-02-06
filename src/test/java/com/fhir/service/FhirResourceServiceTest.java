@@ -47,6 +47,9 @@ class FhirResourceServiceTest {
     @Mock
     private FhirMetrics metrics;
 
+    @Mock
+    private AuditLogService auditLogService;
+
     @Spy
     private FhirContext fhirContext = FhirContext.forR4();
 

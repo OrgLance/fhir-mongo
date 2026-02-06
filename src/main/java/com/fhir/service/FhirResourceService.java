@@ -5,6 +5,7 @@ import ca.uhn.fhir.parser.IParser;
 import com.fhir.exception.FhirResourceNotFoundException;
 import com.fhir.exception.FhirValidationException;
 import com.fhir.metrics.FhirMetrics;
+import com.fhir.model.AuditLog.AuditAction;
 import com.fhir.model.CursorPage;
 import com.fhir.model.FhirResourceDocument;
 import com.fhir.model.FhirResourceHistory;
@@ -53,6 +54,9 @@ public class FhirResourceService {
     @Autowired
     private FhirMetrics metrics;
 
+    @Autowired
+    private AuditLogService auditLogService;
+
     @Value("${fhir.server.base-url}")
     private String baseUrl;
 
@@ -70,6 +74,7 @@ public class FhirResourceService {
     @CacheEvict(value = "counts", key = "#root.target.getResourceTypeFromResource(#resource)")
     public <T extends IBaseResource> T create(T resource) {
         Timer.Sample timer = metrics.startTimer();
+        long startTime = System.currentTimeMillis();
         String resourceType = fhirContext.getResourceType(resource);
         String resourceId = generateResourceId();
 
@@ -116,6 +121,10 @@ public class FhirResourceService {
             // Save history asynchronously
             saveHistoryAsync(resourceType, resourceId, 1L, resourceJson, "CREATE");
 
+            // Log audit event asynchronously
+            auditLogService.logCreate(resourceType, resourceId, 1L, null, null,
+                    System.currentTimeMillis() - startTime);
+
             metrics.recordCreate(resourceType);
             logger.info("Created {} with id: {}", resourceType, resourceId);
             return resource;
@@ -130,11 +139,16 @@ public class FhirResourceService {
                unless = "#result == null")
     public <T extends IBaseResource> T read(String resourceType, String resourceId) {
         Timer.Sample timer = metrics.startTimer();
+        long startTime = System.currentTimeMillis();
 
         try {
             FhirResourceDocument doc = resourceRepository
                     .findByResourceTypeAndResourceIdAndDeletedFalse(resourceType, resourceId)
                     .orElseThrow(() -> new FhirResourceNotFoundException(resourceType, resourceId));
+
+            // Log audit event asynchronously
+            auditLogService.logRead(resourceType, resourceId, null, null,
+                    System.currentTimeMillis() - startTime);
 
             metrics.recordRead(resourceType);
             return parseResourceFromDocument(doc);
@@ -161,6 +175,7 @@ public class FhirResourceService {
     @Transactional
     public <T extends IBaseResource> T update(String resourceType, String resourceId, T resource) {
         Timer.Sample timer = metrics.startTimer();
+        long startTime = System.currentTimeMillis();
 
         try {
             FhirResourceDocument existingDoc = resourceRepository
@@ -221,6 +236,10 @@ public class FhirResourceService {
             // Save history asynchronously
             saveHistoryAsync(resourceType, resourceId, newVersion, resourceJson, "UPDATE");
 
+            // Log audit event asynchronously
+            auditLogService.logUpdate(resourceType, resourceId, newVersion, null, null,
+                    System.currentTimeMillis() - startTime);
+
             metrics.recordUpdate(resourceType);
             logger.info("Updated {} with id: {} to version: {}", resourceType, resourceId, newVersion);
             return resource;
@@ -237,6 +256,8 @@ public class FhirResourceService {
     })
     @Transactional
     public void delete(String resourceType, String resourceId) {
+        long startTime = System.currentTimeMillis();
+
         FhirResourceDocument doc = resourceRepository
                 .findByResourceTypeAndResourceIdAndDeletedFalse(resourceType, resourceId)
                 .orElseThrow(() -> new FhirResourceNotFoundException(resourceType, resourceId));
@@ -250,6 +271,10 @@ public class FhirResourceService {
 
         // Save history asynchronously
         saveHistoryAsync(resourceType, resourceId, doc.getVersionId(), doc.getResourceJson(), "DELETE");
+
+        // Log audit event asynchronously
+        auditLogService.logDelete(resourceType, resourceId, null, null,
+                System.currentTimeMillis() - startTime);
 
         metrics.recordDelete(resourceType);
         logger.info("Deleted {} with id: {}", resourceType, resourceId);
@@ -286,6 +311,7 @@ public class FhirResourceService {
      * @return CursorPage with results and navigation cursors
      */
     public CursorPage<FhirResourceDocument> searchWithCursor(String resourceType, String cursor, int count) {
+        long startTime = System.currentTimeMillis();
         int pageSize = Math.min(count > 0 ? count : defaultPageSize, maxPageSize);
         Pageable pageable = PageRequest.of(0, pageSize + 1, Sort.by(Sort.Direction.ASC, "_id"));
 
@@ -310,6 +336,11 @@ public class FhirResourceService {
         String nextCursor = hasNext && !content.isEmpty()
                 ? content.get(content.size() - 1).getId()
                 : null;
+
+        // Log audit event asynchronously
+        String queryParams = "_cursor=" + (cursor != null ? cursor : "") + "&_count=" + count;
+        auditLogService.logSearch(resourceType, null, null, queryParams, content.size(),
+                System.currentTimeMillis() - startTime);
 
         return CursorPage.of(content, hasNext, nextCursor);
     }

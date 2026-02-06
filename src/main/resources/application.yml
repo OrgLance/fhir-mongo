@@ -67,6 +67,11 @@ fhir:
   compression:
     enabled: true
     threshold-bytes: 10000  # Compress resources larger than 10KB
+  # Audit logging settings (MongoDB time series collections)
+  audit:
+    enabled: ${FHIR_AUDIT_ENABLED:true}
+    retention-days: ${FHIR_AUDIT_RETENTION_DAYS:90}
+    granularity: ${FHIR_AUDIT_GRANULARITY:SECONDS}  # SECONDS, MINUTES, or HOURS
 
 management:
   endpoints:
